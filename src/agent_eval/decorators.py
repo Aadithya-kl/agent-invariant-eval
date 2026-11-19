@@ -191,6 +191,7 @@ class EvaluationSession:
         self.report: EvalReport | None = None
         self._lock = threading.RLock()
         self._token: contextvars.Token[EvaluationSession | None] | None = None
+        self._prechecked_inputs: dict[str, Any] = {}
         self._emitted = False
 
     # ---- lifecycle --------------------------------------------------------------
@@ -220,7 +221,8 @@ class EvaluationSession:
                 try:
                     _current_session.reset(self._token)
                 except ValueError:  # exited from another context
-                    _current_session.set(None)
+                    if _current_session.get() is self:
+                        _current_session.set(None)
                 self._token = None
             self._publish()
         return False
@@ -409,12 +411,25 @@ class EvaluationSession:
         with self._lock:
             span.start_ns = self.clock()
             self.trajectory.spans.append(span)
+            if span.input is not None and not self.blocked:
+                self._prechecked_inputs[span.span_id] = span.input
+                try:
+                    self._check(Stage.SPAN, span)
+                except InvariantViolation:
+                    span.end_ns = span.start_ns
+                    raise
 
     def _close(self, span: Span, *, check: bool) -> None:
         with self._lock:
             span.end_ns = max(span.start_ns, self.clock())
+            prechecked = self._prechecked_inputs.pop(span.span_id, None)
             if check and not self.blocked:
-                self._check(Stage.SPAN, span)
+                focus = (
+                    span.model_copy(update={"input": None})
+                    if prechecked is not None and span.input is prechecked
+                    else span
+                )
+                self._check(Stage.SPAN, focus)
 
 
 def _capture_input(signature: inspect.Signature, args: tuple[Any, ...], kwargs: dict[str, Any],

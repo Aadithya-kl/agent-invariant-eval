@@ -30,14 +30,16 @@ ALL_SCOPES: frozenset[Scope] = frozenset({"input", "output", "tool", "model"})
 # Payload flattening
 # --------------------------------------------------------------------------- #
 
-def flatten_text(payload: Any) -> str:
+def flatten_text(payload: Any, *, ignore_keys: Iterable[str] = ()) -> str:
     """Flatten any payload (str, dict, list, pydantic model, scalar) to text.
 
     Dictionary keys are included, so a value such as ``{"cvv": 123}`` keeps the
-    keyword next to the number.
+    keyword next to the number. Keys in ``ignore_keys`` are skipped along with
+    their values.
     """
     parts: list[str] = []
     seen: set[int] = set()
+    ignored = frozenset(ignore_keys)
 
     def walk(node: Any) -> None:
         if node is None:
@@ -60,6 +62,8 @@ def flatten_text(payload: Any) -> str:
             seen.add(obj_id)
             try:
                 for key, value in node.items():
+                    if str(key) in ignored:
+                        continue
                     if isinstance(value, (str, int, float, Decimal)) and not isinstance(value, bool):
                         parts.append(f"{key}: {value}")
                     else:
@@ -84,18 +88,24 @@ def flatten_text(payload: Any) -> str:
     return "\n".join(parts)
 
 
-def span_texts(span: Span, scopes: Iterable[Scope]) -> Iterator[tuple[str, str | None, str]]:
+def span_texts(
+    span: Span, scopes: Iterable[Scope], *, ignore_keys: Iterable[str] = ()
+) -> Iterator[tuple[str, str | None, str]]:
     """Yield ``(location, span_id, text)`` for the payloads of one span."""
     scope: Scope = "tool" if span.kind is SpanKind.TOOL else "model"
     if scope not in set(scopes):
         return
     for side, payload in (("input", span.input), ("output", span.output)):
         if payload is not None:
-            yield f"{span.name} {side}", span.span_id, flatten_text(payload)
+            yield f"{span.name} {side}", span.span_id, flatten_text(payload, ignore_keys=ignore_keys)
 
 
 def scoped_texts(
-    trajectory: Trajectory, scopes: Iterable[Scope], stage: Stage | None = None
+    trajectory: Trajectory,
+    scopes: Iterable[Scope],
+    stage: Stage | None = None,
+    *,
+    ignore_keys: Iterable[str] = (),
 ) -> Iterator[tuple[str, str | None, str]]:
     """Yield ``(location, span_id, text)`` for every payload inside the scopes.
 
@@ -104,13 +114,13 @@ def scoped_texts(
     """
     wanted = set(scopes)
     if "input" in wanted and trajectory.input is not None:
-        yield "input", None, flatten_text(trajectory.input)
+        yield "input", None, flatten_text(trajectory.input, ignore_keys=ignore_keys)
     if stage is Stage.INPUT:
         return
     for span in trajectory.ordered_spans():
-        yield from span_texts(span, wanted)
+        yield from span_texts(span, wanted, ignore_keys=ignore_keys)
     if "output" in wanted and trajectory.final_output is not None:
-        yield "final output", None, flatten_text(trajectory.final_output)
+        yield "final output", None, flatten_text(trajectory.final_output, ignore_keys=ignore_keys)
 
 
 # --------------------------------------------------------------------------- #
@@ -135,6 +145,14 @@ _SSN_CONTEXT = re.compile(
 )
 _ROUTING_CONTEXT = re.compile(r"(?<![A-Za-z])(?:routing|aba|rtn)(?![A-Za-z])", re.IGNORECASE)
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+_KNOWN_SECRET = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:"
+    r"(?:AKIA|ASIA)[0-9A-Z]{16}"
+    r"|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}"
+    r")(?![A-Za-z0-9_-])"
+)
 _SECRET_TOKEN = re.compile(r"[A-Za-z0-9+/_=-]{24,}")
 _HEX_LIKE = re.compile(r"^[0-9a-fA-F-]+$")
 
@@ -170,8 +188,9 @@ def find_pii(
     detect_secrets: bool = True,
     entropy_threshold: float = 4.0,
     require_routing_context: bool = True,
+    allowed_domains: Iterable[str] = (),
 ) -> list[Finding]:
-    """Find SSNs, ABA routing numbers, emails and high entropy secrets.
+    """Find SSNs, ABA routing numbers, emails, known API keys and high entropy secrets.
 
     A bare nine digit number is a routing number only when it passes the ABA
     checksum and, by default, a routing keyword (routing, ABA, RTN) appears
@@ -180,6 +199,7 @@ def find_pii(
     Set ``require_routing_context=False`` to flag on the checksum alone.
     """
     findings: list[Finding] = []
+    allowed = frozenset(d.lower().lstrip("@") for d in allowed_domains)
 
     for match in _SSN_FORMATTED.finditer(text):
         findings.append(Finding("ssn", match.start(), match.end(), f"***-**-{match.group()[-4:]}"))
@@ -197,10 +217,28 @@ def find_pii(
             )
 
     for match in _EMAIL.finditer(text):
-        findings.append(Finding("email", match.start(), match.end(), _mask_email(match.group())))
+        email = match.group()
+        _, _, domain = email.partition("@")
+        if domain.lower() in allowed:
+            continue
+        findings.append(Finding("email", match.start(), match.end(), _mask_email(email)))
 
     if detect_secrets:
+        known_spans: list[tuple[int, int]] = []
+        for match in _KNOWN_SECRET.finditer(text):
+            token = match.group()
+            known_spans.append((match.start(), match.end()))
+            findings.append(
+                Finding(
+                    "known_secret",
+                    match.start(),
+                    match.end(),
+                    f"{token[:4]}***[{len(token)} chars]",
+                )
+            )
         for match in _SECRET_TOKEN.finditer(text):
+            if any(match.start() < end and match.end() > start for start, end in known_spans):
+                continue
             token = match.group()
             if _HEX_LIKE.match(token):
                 continue  # UUIDs, trace ids, hashes
@@ -236,7 +274,7 @@ def mask_pii(text: str) -> str:
 
 
 class NoPII(BaseInvariant):
-    """No SSNs, routing numbers, emails or high entropy secrets in payloads."""
+    """No SSNs, routing numbers, emails or secrets in payloads."""
 
     name: ClassVar[str] = "no_pii"
 
@@ -247,6 +285,8 @@ class NoPII(BaseInvariant):
         detect_secrets: bool = True,
         entropy_threshold: float = 4.0,
         require_routing_context: bool = True,
+        allowed_domains: Iterable[str] = (),
+        ignore_keys: Iterable[str] = (),
         severity: Severity = Severity.BLOCK,
     ) -> None:
         super().__init__(severity=severity)
@@ -254,13 +294,17 @@ class NoPII(BaseInvariant):
         self.detect_secrets = detect_secrets
         self.entropy_threshold = entropy_threshold
         self.require_routing_context = require_routing_context
+        self.allowed_domains = frozenset(d.lower().lstrip("@") for d in allowed_domains)
+        self.ignore_keys = frozenset(ignore_keys)
 
     def check(self, trajectory: Trajectory, stage: Stage) -> AssertionResult:
-        return self._scan(stage, scoped_texts(trajectory, self.scopes, stage))
+        return self._scan(
+            stage, scoped_texts(trajectory, self.scopes, stage, ignore_keys=self.ignore_keys)
+        )
 
     def check_span(self, trajectory: Trajectory, span: Span, stage: Stage) -> AssertionResult:
         # Earlier payloads were scanned when they were recorded.
-        return self._scan(stage, span_texts(span, self.scopes))
+        return self._scan(stage, span_texts(span, self.scopes, ignore_keys=self.ignore_keys))
 
     def _scan(
         self, stage: Stage, texts: Iterable[tuple[str, str | None, str]]
@@ -273,6 +317,7 @@ class NoPII(BaseInvariant):
                 detect_secrets=self.detect_secrets,
                 entropy_threshold=self.entropy_threshold,
                 require_routing_context=self.require_routing_context,
+                allowed_domains=self.allowed_domains,
             ):
                 evidence.append(f"{finding.kind} in {location}: {finding.masked}")
                 if span_id:
@@ -293,12 +338,30 @@ class NoPII(BaseInvariant):
 # PCI
 # --------------------------------------------------------------------------- #
 
-_PAN_CANDIDATE = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
+_PAN_CANDIDATE = re.compile(r"(?<!\d)\d(?:[ .-]?[0-9]){12,18}(?!\d)")
 _CVV = re.compile(
     r"\b(?:cvv2?|cvc2?|cid|csc|card\s+verification(?:\s+(?:value|code))?|security\s+code)\b"
     r"[^\d\n]{0,12}(\d{3,4})(?!\d)",
     re.IGNORECASE,
 )
+
+
+def known_card_bin(digits: str) -> bool:
+    """True when ``digits`` starts with a major card network IIN/BIN prefix."""
+    if not (13 <= len(digits) <= 19) or not digits.isdigit():
+        return False
+    if digits.startswith("4"):  # Visa
+        return True
+    p2 = int(digits[:2])
+    if p2 in (34, 37, 36, 38, 62, 65) or 51 <= p2 <= 55:  # Amex, Diners, UnionPay, Discover, MC
+        return True
+    p3 = int(digits[:3])
+    if 300 <= p3 <= 305 or 644 <= p3 <= 649:  # Diners, Discover
+        return True
+    p4 = int(digits[:4])
+    if p4 == 6011 or 2221 <= p4 <= 2720 or 3528 <= p4 <= 3589:  # Discover, MC 2-series, JCB
+        return True
+    return False
 
 
 def luhn_valid(number: str) -> bool:
@@ -316,16 +379,24 @@ def luhn_valid(number: str) -> bool:
     return total % 10 == 0
 
 
-def _pan_in_candidate(candidate: str) -> str | None:
+def _pan_in_candidate(candidate: str, *, require_known_bin: bool = False) -> str | None:
     """Return the PAN digits found inside a candidate digit run, if any.
 
     The whole run is tested first. If it fails, group aligned sub runs are
     tested, so ``"42 4111 1111 1111 1111"`` still yields the card number.
     """
-    digits = re.sub(r"[ -]", "", candidate)
-    if 13 <= len(digits) <= 19 and luhn_valid(digits) and len(set(digits)) > 1:
+    def valid(digits: str) -> bool:
+        return (
+            13 <= len(digits) <= 19
+            and luhn_valid(digits)
+            and len(set(digits)) > 1
+            and (not require_known_bin or known_card_bin(digits))
+        )
+
+    digits = re.sub(r"[ .-]", "", candidate)
+    if valid(digits):
         return digits
-    groups = re.split(r"[ -]", candidate)
+    groups = re.split(r"[ .-]", candidate)
     if len(groups) == 1:
         return None
     for start in range(len(groups)):
@@ -334,16 +405,16 @@ def _pan_in_candidate(candidate: str) -> str | None:
             joined += group
             if len(joined) > 19:
                 break
-            if len(joined) >= 13 and luhn_valid(joined) and len(set(joined)) > 1:
+            if len(joined) >= 13 and valid(joined):
                 return joined
     return None
 
 
-def find_pci(text: str) -> list[Finding]:
+def find_pci(text: str, *, require_known_bin: bool = False) -> list[Finding]:
     """Find raw PANs (Luhn valid, 13 to 19 digits) and CVV patterns."""
     findings: list[Finding] = []
     for match in _PAN_CANDIDATE.finditer(text):
-        pan = _pan_in_candidate(match.group())
+        pan = _pan_in_candidate(match.group(), require_known_bin=require_known_bin)
         if pan:
             masked = "*" * (len(pan) - 4) + pan[-4:]
             findings.append(Finding("pan", match.start(), match.end(), masked))
@@ -365,16 +436,22 @@ class PCICompliant(BaseInvariant):
         self,
         *,
         scopes: Iterable[Scope] = ALL_SCOPES,
+        require_known_bin: bool = False,
+        ignore_keys: Iterable[str] = (),
         severity: Severity = Severity.BLOCK,
     ) -> None:
         super().__init__(severity=severity)
         self.scopes = frozenset(scopes)
+        self.require_known_bin = require_known_bin
+        self.ignore_keys = frozenset(ignore_keys)
 
     def check(self, trajectory: Trajectory, stage: Stage) -> AssertionResult:
-        return self._scan(stage, scoped_texts(trajectory, self.scopes, stage))
+        return self._scan(
+            stage, scoped_texts(trajectory, self.scopes, stage, ignore_keys=self.ignore_keys)
+        )
 
     def check_span(self, trajectory: Trajectory, span: Span, stage: Stage) -> AssertionResult:
-        return self._scan(stage, span_texts(span, self.scopes))
+        return self._scan(stage, span_texts(span, self.scopes, ignore_keys=self.ignore_keys))
 
     def _scan(
         self, stage: Stage, texts: Iterable[tuple[str, str | None, str]]
@@ -382,7 +459,7 @@ class PCICompliant(BaseInvariant):
         evidence: list[str] = []
         span_ids: list[str] = []
         for location, span_id, text in texts:
-            for finding in find_pci(text):
+            for finding in find_pci(text, require_known_bin=self.require_known_bin):
                 evidence.append(f"{finding.kind} in {location}: {finding.masked}")
                 if span_id:
                     span_ids.append(span_id)

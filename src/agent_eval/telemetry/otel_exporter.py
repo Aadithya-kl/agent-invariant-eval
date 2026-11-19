@@ -71,6 +71,8 @@ EVAL_EVIDENCE = "agent_eval.evidence"
 EVAL_SPAN_IDS = "agent_eval.span_ids"
 EVAL_SPAN_ID = "agent_eval.span_id"
 EVAL_TRACE_ID = "agent_eval.trace_id"
+TRAJECTORY_PREFIX = "agent_eval.trajectory."
+METRIC_PREFIX = "agent_eval.metric."
 
 _HEX_TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
 _HEX_SPAN_ID = re.compile(r"^[0-9a-f]{16}$")
@@ -91,8 +93,6 @@ class _ReplayIdGenerator(IdGenerator):
     def generate_span_id(self) -> int:
         value, self.next_span_id = self.next_span_id, None
         return value or self._random.generate_span_id()
-TRAJECTORY_PREFIX = "agent_eval.trajectory."
-METRIC_PREFIX = "agent_eval.metric."
 
 
 class JsonFileSpanExporter(SpanExporter):
@@ -156,7 +156,7 @@ def span_attributes(span: Span) -> dict[str, str | int | float | bool]:
         attributes[GEN_AI_TOOL_NAME] = span.tool_name
     if span.model:
         attributes[GEN_AI_REQUEST_MODEL] = span.model
-    if span.input_tokens or span.kind is not SpanKind.TOOL:
+    if span.input_tokens or span.output_tokens or span.kind is not SpanKind.TOOL:
         attributes[GEN_AI_USAGE_INPUT_TOKENS] = span.input_tokens
         attributes[GEN_AI_USAGE_OUTPUT_TOKENS] = span.output_tokens
     if span.status is SpanStatus.ERROR:

@@ -382,3 +382,44 @@ def test_self_referential_payloads_do_not_recurse_infinitely():
     trajectory = Trajectory(spans=[tool_span(cyclic)], final_output="Refunded $42.50.")
     assert assert_numeric_grounding().evaluate(trajectory).passed is True
     assert assert_no_pii().evaluate(trajectory).passed is False
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "AKIA" + "IOSFODNN7EXAMPLE",
+        "ghp_" + "1234567890abcdefghij1234567890",
+        "sk_live_" + "51NxYzAbCdEfGhIjKlMnOpQr",
+        "xoxb-" + "1234567890-abcdef123456",
+    ],
+)
+def test_known_secret_prefixes_detected_without_duplicates(token):
+    findings = find_pii(f"key={token}")
+    assert [f.kind for f in findings] == ["known_secret"]
+    assert token not in findings[0].masked
+
+
+def test_allowed_domains_and_ignore_keys():
+    trajectory = Trajectory(
+        spans=[tool_span({"support": "help@company.com", "trace_key": "AKIA" + "IOSFODNN7EXAMPLE"})],
+        final_output="Reach us at help@company.com",
+    )
+    assert assert_no_pii().evaluate(trajectory).passed is False
+    scoped = assert_no_pii(allowed_domains={"company.com"}, ignore_keys={"trace_key"})
+    assert scoped.evaluate(trajectory).passed is True
+
+    pci_traj = Trajectory(spans=[tool_span({"external_id": TEST_PAN})])
+    assert assert_pci_compliant(ignore_keys={"external_id"}).evaluate(pci_traj).passed is True
+
+
+def test_dot_separated_pan_and_known_bin_filter():
+    assert [f.kind for f in find_pci("card 4111.1111.1111.1111")] == ["pan"]
+    # Luhn valid 16-digit number starting with 99 (not a major card network BIN).
+    non_card = "9900000000000002"
+    assert luhn_valid(non_card)
+    assert [f.kind for f in find_pci(non_card)] == ["pan"]
+    assert find_pci(non_card, require_known_bin=True) == []
+    assert [f.kind for f in find_pci(TEST_PAN, require_known_bin=True)] == ["pan"]
+    assert assert_pci_compliant(require_known_bin=True).evaluate(
+        Trajectory(final_output=non_card)
+    ).passed is True

@@ -545,3 +545,39 @@ def test_on_report_error_is_isolated_and_emitter_supports_context_manager(tmp_pa
             session.set_output("ok")
     assert session.report is not None and session.report.passed
     assert len(path.read_text().splitlines()) == 1
+
+
+def test_tool_input_gate_blocks_before_side_effect_runs():
+    side_effects = []
+    session = EvaluationSession(invariants=default_registry())
+    with pytest.raises(InvariantViolation) as info, session:
+        with session.tool("payment.charge", input={"pan": "4111111111111111"}):
+            side_effects.append("charged")
+    assert side_effects == []
+    assert info.value.report.blocked_at is Stage.SPAN
+    assert info.value.report.violated_names == ["pci_compliant"]
+    assert session.trajectory.spans[0].end_ns == session.trajectory.spans[0].start_ns
+
+
+def test_tool_span_output_tokens_exported_when_input_tokens_zero():
+    exporter = InMemorySpanExporter()
+    emitter = TelemetryEmitter(exporters=[exporter])
+    with EvaluationSession("t", invariants=default_registry(), emitter=emitter) as session:
+        with session.tool("summarizer") as call:
+            call.set_tokens(input_tokens=0, output_tokens=75)
+            call.set_output({"ok": True})
+        session.set_output("done")
+    tool_span = next(s for s in exporter.get_finished_spans() if s.name == "execute_tool summarizer")
+    assert tool_span.attributes["gen_ai.usage.output_tokens"] == 75
+    assert tool_span.attributes["gen_ai.usage.input_tokens"] == 0
+
+
+def test_cross_context_exit_does_not_clobber_outer_session():
+    import contextvars
+
+    with EvaluationSession("outer", invariants=default_registry()) as outer:
+        inner = EvaluationSession("inner", invariants=default_registry())
+        contextvars.copy_context().run(inner.__enter__)
+        inner.__exit__(None, None, None)
+        assert current_session() is outer
+        outer.set_output("ok")

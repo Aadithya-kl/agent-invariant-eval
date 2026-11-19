@@ -1,0 +1,626 @@
+"""Compliance invariants: PII, PCI (Luhn) and numeric grounding.
+
+Everything here is deterministic: regular expressions, checksums, Shannon
+entropy and exact decimal comparison. No model calls.
+
+Evidence attached to results is always masked, because results are exported
+to telemetry backends.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from collections import Counter
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from typing import Any, ClassVar, Literal
+
+from pydantic import BaseModel
+
+from agent_eval.invariants.base import BaseInvariant
+from agent_eval.schemas import AssertionResult, Severity, Span, SpanKind, Stage, Trajectory
+
+Scope = Literal["input", "output", "tool", "model"]
+ALL_SCOPES: frozenset[Scope] = frozenset({"input", "output", "tool", "model"})
+
+
+# --------------------------------------------------------------------------- #
+# Payload flattening
+# --------------------------------------------------------------------------- #
+
+def flatten_text(payload: Any) -> str:
+    """Flatten any payload (str, dict, list, pydantic model, scalar) to text.
+
+    Dictionary keys are included, so a value such as ``{"cvv": 123}`` keeps the
+    keyword next to the number.
+    """
+    parts: list[str] = []
+
+    def walk(node: Any) -> None:
+        if node is None:
+            return
+        if isinstance(node, str):
+            parts.append(node)
+        elif isinstance(node, BaseModel):
+            walk(node.model_dump())
+        elif isinstance(node, Mapping):
+            for key, value in node.items():
+                if isinstance(value, (str, int, float, Decimal)) and not isinstance(value, bool):
+                    parts.append(f"{key}: {value}")
+                else:
+                    parts.append(str(key))
+                    walk(value)
+        elif isinstance(node, (list, tuple, set, frozenset)):
+            for item in node:
+                walk(item)
+        else:
+            parts.append(str(node))
+
+    walk(payload)
+    return "\n".join(parts)
+
+
+def span_texts(span: Span, scopes: Iterable[Scope]) -> Iterator[tuple[str, str | None, str]]:
+    """Yield ``(location, span_id, text)`` for the payloads of one span."""
+    scope: Scope = "tool" if span.kind is SpanKind.TOOL else "model"
+    if scope not in set(scopes):
+        return
+    for side, payload in (("input", span.input), ("output", span.output)):
+        if payload is not None:
+            yield f"{span.name} {side}", span.span_id, flatten_text(payload)
+
+
+def scoped_texts(
+    trajectory: Trajectory, scopes: Iterable[Scope], stage: Stage | None = None
+) -> Iterator[tuple[str, str | None, str]]:
+    """Yield ``(location, span_id, text)`` for every payload inside the scopes.
+
+    At the input stage only the trajectory input is yielded. Otherwise the
+    whole trajectory is covered.
+    """
+    wanted = set(scopes)
+    if "input" in wanted and trajectory.input is not None:
+        yield "input", None, flatten_text(trajectory.input)
+    if stage is Stage.INPUT:
+        return
+    for span in trajectory.ordered_spans():
+        yield from span_texts(span, wanted)
+    if "output" in wanted and trajectory.final_output is not None:
+        yield "final output", None, flatten_text(trajectory.final_output)
+
+
+# --------------------------------------------------------------------------- #
+# PII
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True, slots=True)
+class Finding:
+    kind: str
+    start: int
+    end: int
+    masked: str
+
+
+_SSN_FORMATTED = re.compile(
+    r"(?<!\d)(?!000|666|9\d\d)\d{3}([- ])(?!00)\d{2}\1(?!0000)\d{4}(?!\d)"
+)
+_NINE_DIGITS = re.compile(r"(?<!\d)\d{9}(?!\d)")
+# Letter boundaries instead of \b, so keys such as "routing_number" count.
+_SSN_CONTEXT = re.compile(
+    r"(?<![A-Za-z])(?:ssn|social[\s_]+security|tax[\s_]*id|tin)(?![A-Za-z])", re.IGNORECASE
+)
+_ROUTING_CONTEXT = re.compile(r"(?<![A-Za-z])(?:routing|aba|rtn)(?![A-Za-z])", re.IGNORECASE)
+_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+_SECRET_TOKEN = re.compile(r"[A-Za-z0-9+/_=-]{24,}")
+_HEX_LIKE = re.compile(r"^[0-9a-fA-F-]+$")
+
+
+def shannon_entropy(text: str) -> float:
+    """Shannon entropy in bits per character."""
+    if not text:
+        return 0.0
+    total = len(text)
+    return -sum((n / total) * math.log2(n / total) for n in Counter(text).values())
+
+
+def aba_checksum_valid(digits: str) -> bool:
+    """ABA routing number check: prefix range plus the 3-7-1 weighted checksum."""
+    if len(digits) != 9 or not digits.isdigit():
+        return False
+    prefix = int(digits[:2])
+    if not (0 <= prefix <= 12 or 21 <= prefix <= 32 or 61 <= prefix <= 72 or prefix == 80):
+        return False
+    d = [int(c) for c in digits]
+    total = 3 * (d[0] + d[3] + d[6]) + 7 * (d[1] + d[4] + d[7]) + (d[2] + d[5] + d[8])
+    return total % 10 == 0 and digits != "000000000"
+
+
+def _mask_email(value: str) -> str:
+    local, _, domain = value.partition("@")
+    return f"{local[:1]}***@{domain}"
+
+
+def find_pii(
+    text: str,
+    *,
+    detect_secrets: bool = True,
+    entropy_threshold: float = 4.0,
+    require_routing_context: bool = True,
+) -> list[Finding]:
+    """Find SSNs, ABA routing numbers, emails and high entropy secrets.
+
+    A bare nine digit number is a routing number only when it passes the ABA
+    checksum and, by default, a routing keyword (routing, ABA, RTN) appears
+    just before it. About one in ten random nine digit numbers passes the
+    checksum, so the keyword keeps ids and timestamps from being blocked.
+    Set ``require_routing_context=False`` to flag on the checksum alone.
+    """
+    findings: list[Finding] = []
+
+    for match in _SSN_FORMATTED.finditer(text):
+        findings.append(Finding("ssn", match.start(), match.end(), f"***-**-{match.group()[-4:]}"))
+
+    for match in _NINE_DIGITS.finditer(text):
+        digits = match.group()
+        context = text[max(0, match.start() - 40) : match.start()]
+        if _SSN_CONTEXT.search(context):
+            findings.append(Finding("ssn", match.start(), match.end(), f"*****{digits[-4:]}"))
+        elif aba_checksum_valid(digits) and (
+            not require_routing_context or _ROUTING_CONTEXT.search(context)
+        ):
+            findings.append(
+                Finding("routing_number", match.start(), match.end(), f"*****{digits[-4:]}")
+            )
+
+    for match in _EMAIL.finditer(text):
+        findings.append(Finding("email", match.start(), match.end(), _mask_email(match.group())))
+
+    if detect_secrets:
+        for match in _SECRET_TOKEN.finditer(text):
+            token = match.group()
+            if _HEX_LIKE.match(token):
+                continue  # UUIDs, trace ids, hashes
+            if not (any(c.isdigit() for c in token) and any(c.isalpha() for c in token)):
+                continue
+            if shannon_entropy(token) >= entropy_threshold:
+                findings.append(
+                    Finding(
+                        "high_entropy_secret",
+                        match.start(),
+                        match.end(),
+                        f"{token[:4]}***[{len(token)} chars]",
+                    )
+                )
+
+    return sorted(findings, key=lambda f: (f.start, f.end))
+
+
+def _apply_masks(text: str, findings: Iterable[Finding]) -> str:
+    result = text
+    last_start = len(text) + 1
+    for finding in sorted(findings, key=lambda f: f.start, reverse=True):
+        if finding.end > last_start:
+            continue  # overlapping finding already masked
+        result = result[: finding.start] + finding.masked + result[finding.end :]
+        last_start = finding.start
+    return result
+
+
+def mask_pii(text: str) -> str:
+    """Return ``text`` with every PII finding replaced by its masked form."""
+    return _apply_masks(text, find_pii(text))
+
+
+class NoPII(BaseInvariant):
+    """No SSNs, routing numbers, emails or high entropy secrets in payloads."""
+
+    name: ClassVar[str] = "no_pii"
+
+    def __init__(
+        self,
+        *,
+        scopes: Iterable[Scope] = ALL_SCOPES,
+        detect_secrets: bool = True,
+        entropy_threshold: float = 4.0,
+        require_routing_context: bool = True,
+        severity: Severity = Severity.BLOCK,
+    ) -> None:
+        super().__init__(severity=severity)
+        self.scopes = frozenset(scopes)
+        self.detect_secrets = detect_secrets
+        self.entropy_threshold = entropy_threshold
+        self.require_routing_context = require_routing_context
+
+    def check(self, trajectory: Trajectory, stage: Stage) -> AssertionResult:
+        return self._scan(stage, scoped_texts(trajectory, self.scopes, stage))
+
+    def check_span(self, trajectory: Trajectory, span: Span, stage: Stage) -> AssertionResult:
+        # Earlier payloads were scanned when they were recorded.
+        return self._scan(stage, span_texts(span, self.scopes))
+
+    def _scan(
+        self, stage: Stage, texts: Iterable[tuple[str, str | None, str]]
+    ) -> AssertionResult:
+        evidence: list[str] = []
+        span_ids: list[str] = []
+        for location, span_id, text in texts:
+            for finding in find_pii(
+                text,
+                detect_secrets=self.detect_secrets,
+                entropy_threshold=self.entropy_threshold,
+                require_routing_context=self.require_routing_context,
+            ):
+                evidence.append(f"{finding.kind} in {location}: {finding.masked}")
+                if span_id:
+                    span_ids.append(span_id)
+        if evidence:
+            evidence = list(dict.fromkeys(evidence))
+            return self.fail(
+                stage,
+                f"{len(evidence)} PII finding(s)",
+                evidence=evidence,
+                span_ids=span_ids,
+                findings=float(len(evidence)),
+            )
+        return self.ok(stage, "no PII found")
+
+
+# --------------------------------------------------------------------------- #
+# PCI
+# --------------------------------------------------------------------------- #
+
+_PAN_CANDIDATE = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
+_CVV = re.compile(
+    r"\b(?:cvv2?|cvc2?|cid|csc|card\s+verification(?:\s+(?:value|code))?|security\s+code)\b"
+    r"[^\d\n]{0,12}(\d{3,4})(?!\d)",
+    re.IGNORECASE,
+)
+
+
+def luhn_valid(number: str) -> bool:
+    """Luhn (mod 10) checksum over the digits of ``number``."""
+    digits = [int(c) for c in number if c.isdigit()]
+    if len(digits) < 2:
+        return False
+    total = 0
+    for index, digit in enumerate(reversed(digits)):
+        if index % 2 == 1:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return total % 10 == 0
+
+
+def _pan_in_candidate(candidate: str) -> str | None:
+    """Return the PAN digits found inside a candidate digit run, if any.
+
+    The whole run is tested first. If it fails, group aligned sub runs are
+    tested, so ``"42 4111 1111 1111 1111"`` still yields the card number.
+    """
+    digits = re.sub(r"[ -]", "", candidate)
+    if 13 <= len(digits) <= 19 and luhn_valid(digits) and len(set(digits)) > 1:
+        return digits
+    groups = re.split(r"[ -]", candidate)
+    if len(groups) == 1:
+        return None
+    for start in range(len(groups)):
+        joined = ""
+        for group in groups[start:]:
+            joined += group
+            if len(joined) > 19:
+                break
+            if len(joined) >= 13 and luhn_valid(joined) and len(set(joined)) > 1:
+                return joined
+    return None
+
+
+def find_pci(text: str) -> list[Finding]:
+    """Find raw PANs (Luhn valid, 13 to 19 digits) and CVV patterns."""
+    findings: list[Finding] = []
+    for match in _PAN_CANDIDATE.finditer(text):
+        pan = _pan_in_candidate(match.group())
+        if pan:
+            masked = "*" * (len(pan) - 4) + pan[-4:]
+            findings.append(Finding("pan", match.start(), match.end(), masked))
+    for match in _CVV.finditer(text):
+        findings.append(Finding("cvv", match.start(1), match.end(1), "***"))
+    return sorted(findings, key=lambda f: (f.start, f.end))
+
+
+def mask_pci(text: str) -> str:
+    return _apply_masks(text, find_pci(text))
+
+
+class PCICompliant(BaseInvariant):
+    """No raw PANs or CVV values in prompts, tool payloads or completions."""
+
+    name: ClassVar[str] = "pci_compliant"
+
+    def __init__(
+        self,
+        *,
+        scopes: Iterable[Scope] = ALL_SCOPES,
+        severity: Severity = Severity.BLOCK,
+    ) -> None:
+        super().__init__(severity=severity)
+        self.scopes = frozenset(scopes)
+
+    def check(self, trajectory: Trajectory, stage: Stage) -> AssertionResult:
+        return self._scan(stage, scoped_texts(trajectory, self.scopes, stage))
+
+    def check_span(self, trajectory: Trajectory, span: Span, stage: Stage) -> AssertionResult:
+        return self._scan(stage, span_texts(span, self.scopes))
+
+    def _scan(
+        self, stage: Stage, texts: Iterable[tuple[str, str | None, str]]
+    ) -> AssertionResult:
+        evidence: list[str] = []
+        span_ids: list[str] = []
+        for location, span_id, text in texts:
+            for finding in find_pci(text):
+                evidence.append(f"{finding.kind} in {location}: {finding.masked}")
+                if span_id:
+                    span_ids.append(span_id)
+        if evidence:
+            evidence = list(dict.fromkeys(evidence))
+            return self.fail(
+                stage,
+                f"{len(evidence)} PCI finding(s)",
+                evidence=evidence,
+                span_ids=span_ids,
+                findings=float(len(evidence)),
+            )
+        return self.ok(stage, "no PAN or CVV found")
+
+
+# --------------------------------------------------------------------------- #
+# Numeric grounding
+# --------------------------------------------------------------------------- #
+
+# Western (1,234,567) and Indian (12,34,567) digit grouping.
+_NUM = r"(?:\d{1,3}(?:,\d{3})+|\d{1,2}(?:,\d{2})+,\d{3}|\d+)(?:\.\d+)?"
+_CURRENCY_SYMBOLS = "$€£¥₹₩₽₺₪₫₱"
+# ISO 4217 codes are matched in upper case only, so "try 5 times" is not money.
+_CURRENCY_CODES = (
+    "USD|EUR|GBP|JPY|CAD|AUD|NZD|CHF|CNY|HKD|SGD|INR|KRW|MXN|BRL|ZAR|SEK|NOK|DKK|PLN|CZK|"
+    "HUF|TRY|ILS|AED|SAR|THB|IDR|MYR|PHP|VND|RUB"
+)
+_CURRENCY_WORDS = "dollars?|cents?|euros?|pounds?|yen|rupees?|francs?|yuan|pesos?"
+_MONEY = re.compile(
+    rf"""
+    (?:[{_CURRENCY_SYMBOLS}]\s?|\b(?:{_CURRENCY_CODES})\s?)
+    (?P<n1>{_NUM})
+    (?:\s?(?P<m1>(?i:thousand|million|billion|bn|k|m))\b)?
+    (?!\d|,\d|\.\d)
+    |
+    (?<![\w.,{_CURRENCY_SYMBOLS}])
+    (?P<n2>{_NUM})
+    \s?(?:(?P<m2>(?i:thousand|million|billion))\s)?
+    (?P<u2>(?:{_CURRENCY_CODES})|(?i:{_CURRENCY_WORDS}))\b
+    """,
+    re.VERBOSE,
+)
+# Anything that looks like money, whatever its digit grouping. A loose match
+# that the strict pattern above cannot parse ("€12,50", "1.234,56 EUR") is
+# reported as unparseable, so an unreadable amount blocks instead of slipping
+# through as "no monetary figures".
+_MONEY_LOOSE = re.compile(
+    rf"""
+    (?:[{_CURRENCY_SYMBOLS}]\s?|\b(?:{_CURRENCY_CODES})\s?)\d[\d.,]*
+    |
+    (?<![\w.,{_CURRENCY_SYMBOLS}])\d[\d.,]*
+    \s?(?:(?i:thousand|million|billion)\s)?
+    (?:(?:{_CURRENCY_CODES})|(?i:{_CURRENCY_WORDS}))\b
+    """,
+    re.VERBOSE,
+)
+# A number inside a string grounds a figure only when it stands alone. Digits
+# glued to letters, hyphens, slashes, colons or "#" belong to ids, dates and
+# times ("TXN-1001", "2026-10-03", "12:30", "#42") and are ignored.
+_STANDALONE_NUMBER = re.compile(rf"(?<![\w/:.#,-])(?:-(?=\d))?(?P<n>{_NUM})(?![\w/:-]|,\d|\.\d)")
+_MAGNITUDE = {
+    "k": Decimal(1_000),
+    "thousand": Decimal(1_000),
+    "m": Decimal(1_000_000),
+    "million": Decimal(1_000_000),
+    "bn": Decimal(1_000_000_000),
+    "billion": Decimal(1_000_000_000),
+}
+
+
+def _to_decimal(raw: str) -> Decimal | None:
+    try:
+        return Decimal(raw.replace(",", ""))
+    except InvalidOperation:
+        return None
+
+
+def extract_monetary_figures(text: str) -> list[tuple[str, Decimal]]:
+    """Extract ``(matched text, value)`` for every monetary figure in ``text``.
+
+    Recognises ``$1,234.56``, ``USD 50``, ``50 USD``, ``12.5 dollars``,
+    ``99 cents``, ``$1.2k``, ``$3 million``, ``₹1,00,000``, ``JPY 5000`` and
+    ``C$20``. Symbols: ``$ € £ ¥ ₹ ₩ ₽ ₺ ₪ ₫ ₱``. Codes: the major ISO 4217
+    codes in upper case. The value is the magnitude; the currency is not
+    compared. European decimal commas (``1.234,56``) are not parsed here; they
+    are returned by :func:`find_unparseable_money` and fail grounding.
+    """
+    figures: list[tuple[str, Decimal]] = []
+    for match in _MONEY.finditer(text):
+        raw = match.group("n1") or match.group("n2")
+        value = _to_decimal(raw)
+        if value is None:
+            continue
+        magnitude = (match.group("m1") or match.group("m2") or "").lower()
+        if magnitude:
+            value *= _MAGNITUDE[magnitude]
+        unit = (match.group("u2") or "").lower()
+        if unit.startswith("cent"):
+            value /= Decimal(100)
+        figures.append((match.group().strip(), value))
+    return figures
+
+
+def find_unparseable_money(text: str) -> list[str]:
+    """Money-like text that :func:`extract_monetary_figures` cannot read.
+
+    Typical cases are European decimal commas (``€12,50``, ``1.234,56 EUR``)
+    and malformed grouping. Callers must treat these as failures.
+    """
+    parsed = [match.span() for match in _MONEY.finditer(text)]
+    unparseable: list[str] = []
+    for match in _MONEY_LOOSE.finditer(text):
+        if not any(start <= match.start() < end for start, end in parsed):
+            unparseable.append(match.group().rstrip(".,").strip())
+    return unparseable
+
+
+def collect_numbers(payload: Any, *, from_strings: bool = True) -> tuple[set[Decimal], set[int]]:
+    """Collect the numbers in a payload that may ground a monetary figure.
+
+    Numeric leaves (int, float, Decimal) always count. Numbers inside strings
+    count only when they stand alone, so ids and dates do not ground anything:
+    ``"TXN-1001"`` and ``"2026-10-03"`` contribute nothing, ``"total 1,280.00
+    USD"`` contributes 1280. With ``from_strings=False`` strings are ignored.
+
+    Values are magnitudes: a ledger entry of ``-42.50`` grounds "a refund of
+    $42.50". Returns ``(all values, integer leaves)``. Integer leaves are kept
+    apart so they can optionally be read as minor units (cents).
+    """
+    values: set[Decimal] = set()
+    integers: set[int] = set()
+
+    def walk(node: Any) -> None:
+        if node is None or isinstance(node, bool):
+            return
+        if isinstance(node, int):
+            values.add(Decimal(abs(node)))
+            integers.add(abs(node))
+        elif isinstance(node, (float, Decimal)):
+            value = _to_decimal(str(node))
+            if value is not None and value.is_finite():
+                values.add(abs(value))
+        elif isinstance(node, str):
+            if not from_strings:
+                return
+            for match in _STANDALONE_NUMBER.finditer(node):
+                value = _to_decimal(match.group("n"))
+                if value is not None:
+                    values.add(value)
+        elif isinstance(node, BaseModel):
+            walk(node.model_dump())
+        elif isinstance(node, Mapping):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, (list, tuple, set, frozenset)):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return values, integers
+
+
+class NumericGrounding(BaseInvariant):
+    """Every monetary figure in the final output must exist in a tool payload.
+
+    Matching is exact on decimal value, so ``$42.50`` is grounded by ``42.5``
+    and by ``"42.50"``, but not by ``42.49``. Numbers that are part of an id
+    or a date in a tool string do not ground anything. Derived figures (sums, fees the
+    model computed itself) are not grounded by design: have a tool compute
+    them so they appear in a payload.
+    """
+
+    name: ClassVar[str] = "numeric_grounding"
+    stages: ClassVar[frozenset[Stage]] = frozenset({Stage.OUTPUT})
+
+    def __init__(
+        self,
+        *,
+        include_tool_inputs: bool = False,
+        include_user_input: bool = False,
+        allow_minor_units: bool = False,
+        ground_from_strings: bool = True,
+        severity: Severity = Severity.BLOCK,
+    ) -> None:
+        super().__init__(severity=severity)
+        # False grounds from numeric JSON leaves only (the strictest setting).
+        self.ground_from_strings = ground_from_strings
+        # Tool inputs are written by the model, so by default they cannot
+        # ground a figure. Otherwise a hallucinated argument grounds itself.
+        self.include_tool_inputs = include_tool_inputs
+        self.include_user_input = include_user_input
+        self.allow_minor_units = allow_minor_units
+
+    def check(self, trajectory: Trajectory, stage: Stage) -> AssertionResult:
+        if trajectory.final_output is None:
+            return self.ok(stage, "no final output")
+        output_text = flatten_text(trajectory.final_output)
+        figures = extract_monetary_figures(output_text)
+        unparseable = list(dict.fromkeys(find_unparseable_money(output_text)))
+        if unparseable:
+            # Fail closed: an amount that cannot be read cannot be verified.
+            return self.fail(
+                stage,
+                f"{len(unparseable)} monetary figure(s) in an unsupported number format",
+                evidence=[f"unparseable figure: {item}" for item in unparseable],
+                figures=float(len(figures)),
+                unparseable=float(len(unparseable)),
+            )
+        if not figures:
+            return self.ok(stage, "no monetary figures in output", figures=0.0)
+
+        grounded: set[Decimal] = set()
+        integers: set[int] = set()
+        sources: list[Any] = []
+        for span in trajectory.tool_spans():
+            sources.append(span.output)
+            if self.include_tool_inputs:
+                sources.append(span.input)
+        if self.include_user_input:
+            sources.append(trajectory.input)
+        for source in sources:
+            values, ints = collect_numbers(source, from_strings=self.ground_from_strings)
+            grounded |= values
+            integers |= ints
+
+        ungrounded: list[str] = []
+        for text, value in figures:
+            if value in grounded:
+                continue
+            if self.allow_minor_units:
+                minor = value * 100
+                if minor == minor.to_integral_value() and int(minor) in integers:
+                    continue
+            ungrounded.append(text)
+
+        if ungrounded:
+            unique = list(dict.fromkeys(ungrounded))
+            return self.fail(
+                stage,
+                f"{len(unique)} monetary figure(s) not found in tool payloads",
+                evidence=[f"ungrounded figure: {item}" for item in unique],
+                figures=float(len(figures)),
+                ungrounded=float(len(unique)),
+            )
+        return self.ok(
+            stage, f"{len(figures)} monetary figure(s) grounded", figures=float(len(figures))
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Assert style factories
+# --------------------------------------------------------------------------- #
+
+def assert_no_pii(**kwargs: Any) -> NoPII:
+    return NoPII(**kwargs)
+
+
+def assert_pci_compliant(**kwargs: Any) -> PCICompliant:
+    return PCICompliant(**kwargs)
+
+
+def assert_numeric_grounding(**kwargs: Any) -> NumericGrounding:
+    return NumericGrounding(**kwargs)

@@ -37,6 +37,7 @@ def flatten_text(payload: Any) -> str:
     keyword next to the number.
     """
     parts: list[str] = []
+    seen: set[int] = set()
 
     def walk(node: Any) -> None:
         if node is None:
@@ -44,17 +45,38 @@ def flatten_text(payload: Any) -> str:
         if isinstance(node, str):
             parts.append(node)
         elif isinstance(node, BaseModel):
-            walk(node.model_dump())
+            obj_id = id(node)
+            if obj_id in seen:
+                return
+            seen.add(obj_id)
+            try:
+                walk(node.model_dump())
+            finally:
+                seen.discard(obj_id)
         elif isinstance(node, Mapping):
-            for key, value in node.items():
-                if isinstance(value, (str, int, float, Decimal)) and not isinstance(value, bool):
-                    parts.append(f"{key}: {value}")
-                else:
-                    parts.append(str(key))
-                    walk(value)
+            obj_id = id(node)
+            if obj_id in seen:
+                return
+            seen.add(obj_id)
+            try:
+                for key, value in node.items():
+                    if isinstance(value, (str, int, float, Decimal)) and not isinstance(value, bool):
+                        parts.append(f"{key}: {value}")
+                    else:
+                        parts.append(str(key))
+                        walk(value)
+            finally:
+                seen.discard(obj_id)
         elif isinstance(node, (list, tuple, set, frozenset)):
-            for item in node:
-                walk(item)
+            obj_id = id(node)
+            if obj_id in seen:
+                return
+            seen.add(obj_id)
+            try:
+                for item in node:
+                    walk(item)
+            finally:
+                seen.discard(obj_id)
         else:
             parts.append(str(node))
 
@@ -492,6 +514,7 @@ def collect_numbers(payload: Any, *, from_strings: bool = True) -> tuple[set[Dec
     """
     values: set[Decimal] = set()
     integers: set[int] = set()
+    seen: set[int] = set()
 
     def walk(node: Any) -> None:
         if node is None or isinstance(node, bool):
@@ -511,13 +534,34 @@ def collect_numbers(payload: Any, *, from_strings: bool = True) -> tuple[set[Dec
                 if value is not None:
                     values.add(value)
         elif isinstance(node, BaseModel):
-            walk(node.model_dump())
+            obj_id = id(node)
+            if obj_id in seen:
+                return
+            seen.add(obj_id)
+            try:
+                walk(node.model_dump())
+            finally:
+                seen.discard(obj_id)
         elif isinstance(node, Mapping):
-            for value in node.values():
-                walk(value)
+            obj_id = id(node)
+            if obj_id in seen:
+                return
+            seen.add(obj_id)
+            try:
+                for value in node.values():
+                    walk(value)
+            finally:
+                seen.discard(obj_id)
         elif isinstance(node, (list, tuple, set, frozenset)):
-            for item in node:
-                walk(item)
+            obj_id = id(node)
+            if obj_id in seen:
+                return
+            seen.add(obj_id)
+            try:
+                for item in node:
+                    walk(item)
+            finally:
+                seen.discard(obj_id)
 
     walk(payload)
     return values, integers

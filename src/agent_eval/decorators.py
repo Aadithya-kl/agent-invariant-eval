@@ -380,7 +380,10 @@ class EvaluationSession:
         if self.trajectory.end_ns is None:
             self.trajectory.end_ns = self.clock()
         if self.on_report is not None:
-            self.on_report(self.report)
+            try:
+                self.on_report(self.report)
+            except Exception:  # noqa: BLE001 - callback errors must not break the verdict
+                logger.exception("on_report callback failed for trace %s", self.trajectory.trace_id)
         if self.emitter is not None:
             try:
                 self.emitter.emit(self.trajectory, self.report)

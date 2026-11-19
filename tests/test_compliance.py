@@ -374,3 +374,11 @@ def test_payload_scans_grow_linearly_with_spans(monkeypatch):
         session.set_output("done")
     # input gate 1 + two payloads per span + one full pass at the end.
     assert calls["pii"] == 1 + 2 * spans + (1 + 2 * spans + 1)
+
+
+def test_self_referential_payloads_do_not_recurse_infinitely():
+    cyclic: dict = {"amount": 42.5, "note": "mail jane.doe@example.com"}
+    cyclic["self"] = cyclic
+    trajectory = Trajectory(spans=[tool_span(cyclic)], final_output="Refunded $42.50.")
+    assert assert_numeric_grounding().evaluate(trajectory).passed is True
+    assert assert_no_pii().evaluate(trajectory).passed is False

@@ -531,3 +531,17 @@ def test_cli_benchmark_rejects_bad_models_reference():
          "--models", "missing.json"],
     )
     assert result.exit_code != 0
+
+
+def test_on_report_error_is_isolated_and_emitter_supports_context_manager(tmp_path):
+    def broken_callback(_report):
+        raise RuntimeError("callback boom")
+
+    path = tmp_path / "cm_spans.jsonl"
+    with TelemetryEmitter(exporters=[JsonFileSpanExporter(path)]) as emitter:
+        with EvaluationSession(
+            "cm", invariants=default_registry(), emitter=emitter, on_report=broken_callback
+        ) as session:
+            session.set_output("ok")
+    assert session.report is not None and session.report.passed
+    assert len(path.read_text().splitlines()) == 1

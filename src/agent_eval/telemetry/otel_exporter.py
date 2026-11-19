@@ -306,3 +306,11 @@ class TelemetryEmitter:
 
     def shutdown(self) -> None:
         self._provider.shutdown()
+
+    def __enter__(self) -> TelemetryEmitter:
+        return self
+
+    def __exit__(self, *_: object) -> bool:
+        self.force_flush()
+        self.shutdown()
+        return False

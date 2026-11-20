@@ -4,7 +4,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Deterministic, fail-closed governance and evaluation for multi-agent workflows — **no LLM judge in the loop**.
+Deterministic, fail-closed governance and evaluation for multi-agent workflows. **No LLM judge in the loop.**
 
 `agent-invariant-eval` wraps any agent loop (LangGraph, CrewAI, or a raw API loop) and enforces
 hard invariants on its inputs, tool calls, routing and final output. Every check is plain
@@ -21,7 +21,7 @@ trace always produces the same verdict.
   PASS no_routing_loops: 2 hop(s), no runaway routing
   PASS no_swallowed_tool_failures: no unhandled tool failures
 
-# InvariantViolation raised — the hallucinated refund never reaches the caller.
+# InvariantViolation raised: the hallucinated refund never reaches the caller.
 ```
 
 It does three jobs:

@@ -5,7 +5,7 @@ type: software
 authors:
   - given-names: Sankaranainar
     family-names: Paramasivan
-    # orcid: "https://orcid.org/0000-0000-0000-0000"
+    orcid: "https://orcid.org/0009-0006-1738-3863"
 repository-code: "https://github.com/sankaranainar-p/agent-invariant-eval"
 license: MIT
 version: "0.3.0"

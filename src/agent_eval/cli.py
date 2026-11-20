@@ -65,12 +65,23 @@ def _load_models(reference: str) -> list[ModelConfig]:
 def scan(
     text: Annotated[str | None, typer.Argument(help="Text to scan. Omit to use --file.")] = None,
     file: Annotated[Path | None, typer.Option("--file", "-f", help="File to scan.")] = None,
+    allowed_domain: Annotated[
+        list[str] | None,
+        typer.Option("--allowed-domain", help="Email domain to exempt (repeatable)."),
+    ] = None,
+    require_known_bin: Annotated[
+        bool,
+        typer.Option("--require-known-bin", help="Only flag PANs with a known card network BIN."),
+    ] = False,
 ) -> None:
     """Scan text for PII and PCI data. Findings are printed masked. Exit 1 on any finding."""
     if (text is None) == (file is None):
         raise typer.BadParameter("give either TEXT or --file, not both")
     content = text if text is not None else file.read_text(encoding="utf-8")  # type: ignore[union-attr]
-    findings = [*find_pii(content), *find_pci(content)]
+    findings = [
+        *find_pii(content, allowed_domains=allowed_domain or ()),
+        *find_pci(content, require_known_bin=require_known_bin),
+    ]
     if not findings:
         typer.echo("clean: no PII or PCI findings")
         return

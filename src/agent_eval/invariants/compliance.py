@@ -152,7 +152,10 @@ _KNOWN_SECRET = re.compile(
     r"(?<![A-Za-z0-9_-])(?:"
     r"(?:AKIA|ASIA)[0-9A-Z]{16}"
     r"|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
     r"|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}"
+    r"|sk-(?:ant|proj)-[A-Za-z0-9_-]{20,}"
+    r"|AIza[0-9A-Za-z_-]{35}"
     r"|xox[baprs]-[A-Za-z0-9-]{10,}"
     r")(?![A-Za-z0-9_-])"
 )
@@ -222,7 +225,8 @@ def find_pii(
     for match in _EMAIL.finditer(text):
         email = match.group()
         _, _, domain = email.partition("@")
-        if domain.lower() in allowed:
+        lower_domain = domain.lower()
+        if lower_domain in allowed or any(lower_domain.endswith("." + a) for a in allowed):
             continue
         findings.append(Finding("email", match.start(), match.end(), _mask_email(email)))
 
@@ -271,9 +275,25 @@ def _apply_masks(text: str, findings: Iterable[Finding]) -> str:
     return result
 
 
-def mask_pii(text: str) -> str:
+def mask_pii(
+    text: str,
+    *,
+    detect_secrets: bool = True,
+    entropy_threshold: float = 4.0,
+    require_routing_context: bool = True,
+    allowed_domains: Iterable[str] = (),
+) -> str:
     """Return ``text`` with every PII finding replaced by its masked form."""
-    return _apply_masks(text, find_pii(text))
+    return _apply_masks(
+        text,
+        find_pii(
+            text,
+            detect_secrets=detect_secrets,
+            entropy_threshold=entropy_threshold,
+            require_routing_context=require_routing_context,
+            allowed_domains=allowed_domains,
+        ),
+    )
 
 
 class NoPII(BaseInvariant):
@@ -341,7 +361,9 @@ class NoPII(BaseInvariant):
 # PCI
 # --------------------------------------------------------------------------- #
 
-_PAN_CANDIDATE = re.compile(r"(?<!\d)\d(?:[ .-]?[0-9]){12,18}(?!\d)")
+_PAN_CANDIDATE = re.compile(
+    r"(?<![\d.])(?:\d{4}(?:\.\d{4}){3}|\d(?:[ -]?\d){12,18})(?!\.\d)(?!\d)"
+)
 _CVV = re.compile(
     r"\b(?:cvv2?|cvc2?|cid|csc|card\s+verification(?:\s+(?:value|code))?|security\s+code)\b"
     r"[^\d\n]{0,12}(\d{3,4})(?!\d)",
@@ -426,8 +448,8 @@ def find_pci(text: str, *, require_known_bin: bool = False) -> list[Finding]:
     return sorted(findings, key=lambda f: (f.start, f.end))
 
 
-def mask_pci(text: str) -> str:
-    return _apply_masks(text, find_pci(text))
+def mask_pci(text: str, *, require_known_bin: bool = False) -> str:
+    return _apply_masks(text, find_pci(text, require_known_bin=require_known_bin))
 
 
 class PCICompliant(BaseInvariant):

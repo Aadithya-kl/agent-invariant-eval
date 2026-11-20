@@ -389,7 +389,11 @@ def test_self_referential_payloads_do_not_recurse_infinitely():
     [
         "AKIA" + "IOSFODNN7EXAMPLE",
         "ghp_" + "1234567890abcdefghij1234567890",
+        "github_pat_" + "11ABCDEFG0123456789_abcdef0123456789",
         "sk_live_" + "51NxYzAbCdEfGhIjKlMnOpQr",
+        "sk-ant-" + "api03-abcdefghijklmnopqrstuvwx",
+        "sk-proj-" + "abcdefghijklmnopqrstuvwx0123",
+        "AIza" + "SyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe",
         "xoxb-" + "1234567890-abcdef123456",
     ],
 )
@@ -400,26 +404,41 @@ def test_known_secret_prefixes_detected_without_duplicates(token):
 
 
 def test_allowed_domains_and_ignore_keys():
-    payload = {"support": "help@company.com", "trace_key": "AKIA" + "IOSFODNN7EXAMPLE"}
+    payload = {"support": "help@mail.company.com", "trace_key": "AKIA" + "IOSFODNN7EXAMPLE"}
     trajectory = Trajectory(
         spans=[tool_span(payload)],
-        final_output="Reach us at help@company.com",
+        final_output="Reach us at help@company.com or ops@mail.company.com",
     )
     assert assert_no_pii().evaluate(trajectory).passed is False
     scoped = assert_no_pii(allowed_domains={"company.com"}, ignore_keys={"trace_key"})
     assert scoped.evaluate(trajectory).passed is True
+    # Suffix lookalike must not match subdomain allowlist.
+    assert find_pii("hi@notcompany.com", allowed_domains={"company.com"}) != []
+    assert mask_pii("ops@mail.company.com", allowed_domains={"company.com"}) == (
+        "ops@mail.company.com"
+    )
 
     pci_traj = Trajectory(spans=[tool_span({"external_id": TEST_PAN})])
     assert assert_pci_compliant(ignore_keys={"external_id"}).evaluate(pci_traj).passed is True
 
 
 def test_dot_separated_pan_and_known_bin_filter():
-    assert [f.kind for f in find_pci("card 4111.1111.1111.1111")] == ["pan"]
+    assert [f.kind for f in find_pci("card 4111.1111.1111.1111.")] == ["pan"]
+    # Decimals, timestamps, and large amounts must never trigger PAN detection.
+    for clean in (
+        "rate: 0.4111111111111111",
+        "ts: 1700000123.456789",
+        "amount: 41111111111111.11",
+        "oid: 1.2.840.113549.1.1.11",
+    ):
+        assert find_pci(clean) == [], clean
+
     # Luhn valid 16-digit number starting with 99 (not a major card network BIN).
     non_card = "9900000000000002"
     assert luhn_valid(non_card)
     assert [f.kind for f in find_pci(non_card)] == ["pan"]
     assert find_pci(non_card, require_known_bin=True) == []
+    assert mask_pci(non_card, require_known_bin=True) == non_card
     assert [f.kind for f in find_pci(TEST_PAN, require_known_bin=True)] == ["pan"]
     assert assert_pci_compliant(require_known_bin=True).evaluate(
         Trajectory(final_output=non_card)

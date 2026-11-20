@@ -483,6 +483,13 @@ def test_cli_scan():
     assert dirty.exit_code == 1
     assert "************1111" in dirty.output and "4111 1111" not in dirty.output
 
+    exempt = runner.invoke(
+        app,
+        ["scan", "ops@mail.company.com 9900000000000002",
+         "--allowed-domain", "company.com", "--require-known-bin"],
+    )
+    assert exempt.exit_code == 0 and "clean" in exempt.output
+
     assert runner.invoke(app, ["scan"]).exit_code != 0
 
 

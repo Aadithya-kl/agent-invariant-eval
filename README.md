@@ -128,7 +128,7 @@ turning enforcement on.
                               |
       +-----------------------+------------------------+
       | INPUT gate            | SPAN gate              | OUTPUT gate
-      | on set_input()        | on every span close    | on exit / finalize()
+      | on set_input()        | on span open & close   | on exit / finalize()
       +-----------------------+------------------------+
                               |
                   InvariantRegistry (fail closed)              invariants/base.py
@@ -320,7 +320,7 @@ Output of the bundled example (fictional models and prices, simulated latency):
 | frontier-xl | 100.0% | 10/10 | 0.305250 | 11200 | yes | viable |
 | balanced-m | 90.0% | 9/10 | 0.061050 | 9900 | yes | **recommended** |
 | balanced-m-legacy | 90.0% | 9/10 | 0.081400 | 10400 | no | dominated |
-| distilled-s | 50.0% | 5/10 | 0.005262 | 9320 | yes | below 90% pass floor |
+| distilled-s | 50.0% | 5/10 | 0.005088 | 9320 | yes | below 90% pass floor |
 
 The frontier maximises pass rate and minimises total cost and p95 latency. The recommendation
 is the cheapest frontier model at or above `min_pass_rate`. If none clears the floor, the

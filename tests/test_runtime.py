@@ -567,7 +567,9 @@ def test_tool_span_output_tokens_exported_when_input_tokens_zero():
             call.set_tokens(input_tokens=0, output_tokens=75)
             call.set_output({"ok": True})
         session.set_output("done")
-    tool_span = next(s for s in exporter.get_finished_spans() if s.name == "execute_tool summarizer")
+    tool_span = next(
+        s for s in exporter.get_finished_spans() if s.name == "execute_tool summarizer"
+    )
     assert tool_span.attributes["gen_ai.usage.output_tokens"] == 75
     assert tool_span.attributes["gen_ai.usage.input_tokens"] == 0
 

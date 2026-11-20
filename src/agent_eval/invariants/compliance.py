@@ -64,7 +64,9 @@ def flatten_text(payload: Any, *, ignore_keys: Iterable[str] = ()) -> str:
                 for key, value in node.items():
                     if str(key) in ignored:
                         continue
-                    if isinstance(value, (str, int, float, Decimal)) and not isinstance(value, bool):
+                    if isinstance(value, (str, int, float, Decimal)) and not isinstance(
+                        value, bool
+                    ):
                         parts.append(f"{key}: {value}")
                     else:
                         parts.append(str(key))
@@ -97,7 +99,8 @@ def span_texts(
         return
     for side, payload in (("input", span.input), ("output", span.output)):
         if payload is not None:
-            yield f"{span.name} {side}", span.span_id, flatten_text(payload, ignore_keys=ignore_keys)
+            text = flatten_text(payload, ignore_keys=ignore_keys)
+            yield f"{span.name} {side}", span.span_id, text
 
 
 def scoped_texts(

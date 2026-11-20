@@ -136,7 +136,12 @@ def make_otlp_exporter(
     ``OTEL_EXPORTER_OTLP_HEADERS``. An explicit ``endpoint`` must be the full
     traces URL, for example ``http://localhost:4318/v1/traces``.
     """
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    try:
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    except ImportError as exc:
+        raise ImportError(
+            "OTLP export requires the 'otlp' extra: pip install 'agent-invariant-eval[otlp]'"
+        ) from exc
 
     return OTLPSpanExporter(
         endpoint=endpoint,
@@ -310,7 +315,6 @@ class TelemetryEmitter:
     def __enter__(self) -> TelemetryEmitter:
         return self
 
-    def __exit__(self, *_: object) -> bool:
+    def __exit__(self, *_: object) -> None:
         self.force_flush()
         self.shutdown()
-        return False

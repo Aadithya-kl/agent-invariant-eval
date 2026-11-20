@@ -8,7 +8,12 @@ import sys
 from pathlib import Path
 from typing import Annotated, Any
 
-import typer
+try:
+    import typer
+except ImportError as exc:
+    raise ImportError(
+        "The CLI requires the 'cli' extra: pip install 'agent-invariant-eval[cli]'"
+    ) from exc
 
 from agent_eval.benchmark.frontier import FrontierRunner, ModelConfig, load_dataset
 from agent_eval.decorators import SimClock

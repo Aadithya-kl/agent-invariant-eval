@@ -400,8 +400,9 @@ def test_known_secret_prefixes_detected_without_duplicates(token):
 
 
 def test_allowed_domains_and_ignore_keys():
+    payload = {"support": "help@company.com", "trace_key": "AKIA" + "IOSFODNN7EXAMPLE"}
     trajectory = Trajectory(
-        spans=[tool_span({"support": "help@company.com", "trace_key": "AKIA" + "IOSFODNN7EXAMPLE"})],
+        spans=[tool_span(payload)],
         final_output="Reach us at help@company.com",
     )
     assert assert_no_pii().evaluate(trajectory).passed is False

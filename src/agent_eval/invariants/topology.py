@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Hashable, Iterable, Mapping
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar
 
 from agent_eval.invariants.base import BaseInvariant
 from agent_eval.invariants.compliance import flatten_text
@@ -25,15 +25,16 @@ from agent_eval.schemas import (
 )
 
 _RUNTIME_STAGES: frozenset[Stage] = frozenset({Stage.SPAN, Stage.OUTPUT})
+_T = TypeVar("_T", bound=Hashable)
 
 
-def find_cycle[T: Hashable](edges: Iterable[tuple[T, T]]) -> list[T] | None:
+def find_cycle(edges: Iterable[tuple[_T, _T]]) -> list[_T] | None:
     """Return one cycle in a directed graph as ``[a, b, ..., a]``, or ``None``.
 
     Iterative three colour depth first search, so deep graphs do not hit the
     recursion limit.
     """
-    graph: dict[T, list[T]] = {}
+    graph: dict[_T, list[_T]] = {}
     for source, target in edges:
         graph.setdefault(source, [])
         graph.setdefault(target, [])
@@ -41,11 +42,11 @@ def find_cycle[T: Hashable](edges: Iterable[tuple[T, T]]) -> list[T] | None:
             graph[source].append(target)
 
     white, grey, black = 0, 1, 2
-    colour: dict[T, int] = dict.fromkeys(graph, white)
+    colour: dict[_T, int] = dict.fromkeys(graph, white)
     for root in graph:
         if colour[root] != white:
             continue
-        path: list[T] = [root]
+        path: list[_T] = [root]
         stack = [iter(graph[root])]
         colour[root] = grey
         while stack:

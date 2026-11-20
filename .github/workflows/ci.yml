@@ -10,12 +10,15 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
-      - run: pytest
+      - run: ruff check src tests examples
+      - run: mypy src
+      - run: pytest --cov=agent_eval --cov-report=term-missing --cov-fail-under=90
       - run: python examples/payment_dispute_agent/run_eval.py
+      - run: python -m build

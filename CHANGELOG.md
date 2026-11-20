@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.3.0
+
+### Runtime and telemetry
+
+* **Pre-execution span input gate.** `EvaluationSession._open()` now evaluates `Stage.SPAN`
+  invariants on `span.input` before yielding control to the `with` block, blocking tool side
+  effects on non-compliant inputs. `_close()` skips re-scanning unchanged pre-checked inputs so
+  scanning stays linear.
+* **Cycle guards and callback isolation.** `flatten_text()` and `collect_numbers()` guard against
+  self-referential containers. `on_report` callback errors are logged without breaking verdicts.
+* **Context & OTel fixes.** Cross-context `EvaluationSession.__exit__` no longer clobbers an outer
+  session. `TelemetryEmitter` supports `with TelemetryEmitter(...) as emitter:` and exports
+  `gen_ai.usage.output_tokens` on tool spans even when `input_tokens == 0`.
+
+### Compliance
+
+* **Known secret prefixes.** `find_pii()` detects AWS (`AKIA`/`ASIA`), GitHub (`gh[pousr]_`),
+  Stripe (`sk_live_`/`rk_live_`/`sk_test_`/`rk_test_`), and Slack (`xox[baprs]-`) credentials
+  regardless of length, without duplicating `high_entropy_secret` findings.
+* **Allowlists and BIN filtering.** Added `allowed_domains` to `NoPII`, `ignore_keys` to `NoPII`
+  and `PCICompliant`, dot-separated PAN support (`4111.1111.1111.1111`), and `require_known_bin`
+  to `PCICompliant` / `find_pci()`.
+
+### Packaging and CI
+
+* **Python 3.11+ support.** Replaced PEP 695 generics in `find_cycle` with `TypeVar`.
+* **Optional extras.** Moved `typer` to `[cli]` and `opentelemetry-exporter-otlp-proto-http` to
+  `[otlp]` (with `[all]` and `[dev]`).
+* **CI & Release workflows.** Added GitHub Actions CI (`ruff`, `mypy --strict`, `pytest --cov`
+  with 90% floor, `run_eval.py`, `python -m build` across Python 3.11–3.13), `SECURITY.md`, and
+  PyPI Trusted Publishing release workflow.
+
 ## 0.2.0
 
 Addresses an external review of 0.1.0. Behaviour changes are marked **changed**.

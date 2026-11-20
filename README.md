@@ -1,5 +1,7 @@
 # agent-invariant-eval
 
+[![CI](https://github.com/sankaranainar-p/agent-invariant-eval/actions/workflows/ci.yml/badge.svg)](https://github.com/sankaranainar-p/agent-invariant-eval/actions/workflows/ci.yml)
+
 Deterministic, fail-closed governance and evaluation for multi-agent workflows.
 
 `agent-invariant-eval` wraps any agent loop (LangGraph, CrewAI, a raw API loop) and enforces
@@ -18,12 +20,16 @@ It does three jobs:
 ## Install
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"                  # development (tests, CLI, OTLP, ruff, mypy)
+pip install -e ".[cli,otlp]"             # core + CLI + OTLP exporter (or ".[all]")
 pytest
 python examples/payment_dispute_agent/run_eval.py
 ```
 
-Requires Python 3.12 or newer.
+Core dependencies are `pydantic`, `opentelemetry-api`, and `opentelemetry-sdk`. The CLI (`typer`)
+and OTLP exporter (`opentelemetry-exporter-otlp-proto-http`) are optional extras (`[cli]`, `[otlp]`).
+
+Requires Python 3.11 or newer.
 
 ## Quickstart
 
@@ -182,12 +188,19 @@ Detection details:
   and a routing keyword (routing, ABA, RTN) just before it. One in ten random nine digit ids
   passes the checksum alone, so the keyword is required by default. Use
   `assert_no_pii(require_routing_context=False)` to flag on the checksum alone.
-* **Incremental scanning.** At a span boundary only the span that just closed is scanned. The
-  final pass scans everything once more for the report.
-* **Secrets.** Tokens of 24 or more characters that mix letters and digits and have Shannon
-  entropy of at least 4.0 bits per character. Hex strings and UUIDs are skipped.
-* **PAN.** Digit runs of 13 to 19 digits, with optional spaces or dashes, that pass Luhn.
-  A PAN embedded in a longer run is found by testing group aligned sub runs.
+* **Incremental & pre-execution scanning.** When a span opens with an `input`, `Stage.SPAN`
+  invariants run before the `with` block executes (blocking tool side effects on violating inputs).
+  When the span closes, only its new payloads are scanned. The final pass scans everything once
+  more for the report.
+* **Secrets & allowlists.** Detects known API key prefixes (AWS `AKIA`/`ASIA`, GitHub `gh[pousr]_`,
+  Stripe `sk_live_`/`rk_live_`, Slack `xox[baprs]-`) plus tokens of 24 or more characters that mix
+  letters and digits with Shannon entropy of at least 4.0 bits per character (hex strings and UUIDs
+  are skipped). Use `allowed_domains={"company.com"}` and `ignore_keys={"trace_id"}` to exempt
+  known corporate domains or metadata keys.
+* **PAN.** Digit runs of 13 to 19 digits, with optional spaces, dashes or dots, that pass Luhn.
+  A PAN embedded in a longer run is found by testing group aligned sub runs. Pass
+  `assert_pci_compliant(require_known_bin=True)` to restrict matches to major card network IIN/BIN
+  prefixes and cut false positives on 16-digit IDs.
 * **Grounding.** Figures such as `$1,234.56`, `USD 50`, `12.5 dollars`, `99 cents`, `$1.2k`,
   `JPY 5000`, `₹1,00,000` and `C$20` are parsed to `Decimal` and matched exactly against
   numbers in tool outputs. Numeric JSON leaves always count. A number inside a string counts
@@ -390,12 +403,12 @@ backend expects.
 ```python
 from agent_eval.telemetry import JsonFileSpanExporter, TelemetryEmitter, make_otlp_exporter
 
-emitter = TelemetryEmitter(
+with TelemetryEmitter(
     exporters=[JsonFileSpanExporter("out/otel_spans.jsonl")],     # synchronous
     batch_exporters=[make_otlp_exporter()],                       # background batches
     service_name="payment-dispute-agent",
-)
-session = EvaluationSession("dispute", invariants=registry, emitter=emitter)
+) as emitter:
+    session = EvaluationSession("dispute", invariants=registry, emitter=emitter)
 ```
 
 `make_otlp_exporter()` is the standard OTLP over HTTP exporter and reads the standard
@@ -443,8 +456,9 @@ on a routing loop, the frontier table, and the span export to `out/otel_spans.js
   missed by default. Treat these checks as a deterministic floor and not as a DLP product.
 * **Strict grounding.** Exact match only. Rounded or derived amounts fail. A standalone number
   in a tool string (`"id 1001"`) still grounds; use `ground_from_strings=False` to rule that
-  out. Currency is not compared. European decimal commas (`€12,50`, `1.234,56 EUR`) are not parsed
-  and block as unparseable figures.
+  out. Currency is not compared. Spelled-out amounts (`"forty two dollars"`) and numbers without a
+  currency marker (`"refund 42.50"`) are not extracted as money. European decimal commas (`€12,50`,
+  `1.234,56 EUR`) are not parsed and block as unparseable figures.
 * **Acknowledgement is a heuristic.** "We couldn't deliver your parcel, refund approved" after
   a ledger timeout reads as an acknowledgement. Use `allow_acknowledgement=False` where that
   matters and mark handled failures with `scope.mark_handled()`.

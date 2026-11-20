@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+title: agent-invariant-eval
+message: "If you use this software in research or engineering reports, please cite it using these metadata."
+type: software
+authors:
+  - given-names: Sankaranainar
+    family-names: Paramasivan
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+repository-code: "https://github.com/sankaranainar-p/agent-invariant-eval"
+license: MIT
+version: "0.3.0"
+date-released: "2026-11-20"
+keywords:
+  - llm-agents
+  - ai-governance
+  - opentelemetry
+  - pci-dss
+  - evaluation

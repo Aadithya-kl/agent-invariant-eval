@@ -16,21 +16,27 @@
 
 ### Compliance
 
-* **Known secret prefixes.** `find_pii()` detects AWS (`AKIA`/`ASIA`), GitHub (`gh[pousr]_`),
-  Stripe (`sk_live_`/`rk_live_`/`sk_test_`/`rk_test_`), and Slack (`xox[baprs]-`) credentials
-  regardless of length, without duplicating `high_entropy_secret` findings.
-* **Allowlists and BIN filtering.** Added `allowed_domains` to `NoPII`, `ignore_keys` to `NoPII`
-  and `PCICompliant`, dot-separated PAN support (`4111.1111.1111.1111`), and `require_known_bin`
-  to `PCICompliant` / `find_pci()`.
+* **Known secret prefixes.** `find_pii()` detects AWS (`AKIA`/`ASIA`), GitHub (`gh[pousr]_`,
+  `github_pat_`), Stripe (`sk_live_`/`rk_live_`/`sk_test_`/`rk_test_`), Anthropic (`sk-ant-`),
+  OpenAI (`sk-proj-`), Google (`AIza`), and Slack (`xox[baprs]-`) credentials regardless of
+  length, without duplicating `high_entropy_secret` findings.
+* **Allowlists and BIN filtering.** Added `allowed_domains` (matching exact domains and
+  subdomains) to `NoPII` and `mask_pii()`, `ignore_keys` to `NoPII` and `PCICompliant`,
+  `require_known_bin` to `PCICompliant`, `find_pci()`, and `mask_pci()`, plus CLI flags
+  `--allowed-domain` and `--require-known-bin` on `agent-eval scan`.
+* **Fixed PAN false positives on decimals.** `_PAN_CANDIDATE` now ignores fractional parts of
+  decimal numbers (`0.8475...`), epoch timestamps (`1700000123.456789`), large amounts, and OIDs,
+  accepting dot separators only in strict `4.4.4.4` card grouping (`4111.1111.1111.1111`).
 
 ### Packaging and CI
 
 * **Python 3.11+ support.** Replaced PEP 695 generics in `find_cycle` with `TypeVar`.
 * **Optional extras.** Moved `typer` to `[cli]` and `opentelemetry-exporter-otlp-proto-http` to
   `[otlp]` (with `[all]` and `[dev]`).
-* **CI & Release workflows.** Added GitHub Actions CI (`ruff`, `mypy --strict`, `pytest --cov`
-  with 90% floor, `run_eval.py`, `python -m build` across Python 3.11–3.13), `SECURITY.md`, and
-  PyPI Trusted Publishing release workflow.
+* **CI, security & release workflows.** Added GitHub Actions CI (`permissions: contents: read`,
+  `ruff`, `mypy --strict`, `pytest --cov` with 90% floor, `run_eval.py`, `python -m build` across
+  Python 3.11–3.13), `SECURITY.md`, `CONTRIBUTING.md`, `CITATION.cff`, issue templates, and PyPI
+  Trusted Publishing release workflow with tag-vs-version verification.
 
 ## 0.2.0
 

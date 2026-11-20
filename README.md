@@ -1,17 +1,32 @@
 # agent-invariant-eval
 
 [![CI](https://github.com/sankaranainar-p/agent-invariant-eval/actions/workflows/ci.yml/badge.svg)](https://github.com/sankaranainar-p/agent-invariant-eval/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Deterministic, fail-closed governance and evaluation for multi-agent workflows.
+Deterministic, fail-closed governance and evaluation for multi-agent workflows — **no LLM judge in the loop**.
 
-`agent-invariant-eval` wraps any agent loop (LangGraph, CrewAI, a raw API loop) and enforces
+`agent-invariant-eval` wraps any agent loop (LangGraph, CrewAI, or a raw API loop) and enforces
 hard invariants on its inputs, tool calls, routing and final output. Every check is plain
-Python: regular expressions, checksums, exact decimal comparison and graph analysis. No model
-judges another model, so the same trace always produces the same verdict.
+Python: regular expressions, checksums, exact decimal comparison and graph analysis. The same
+trace always produces the same verdict.
+
+```text
+[payment_dispute] verdict=block blocked_at=output
+  PASS no_pii: no PII found
+  PASS pci_compliant: no PAN or CVV found
+  FAIL numeric_grounding: 1 monetary figure(s) not found in tool payloads
+       evidence: ungrounded figure: $2,199.90
+  PASS valid_span_dag: span graph is a valid DAG
+  PASS no_routing_loops: 2 hop(s), no runaway routing
+  PASS no_swallowed_tool_failures: no unhandled tool failures
+
+# InvariantViolation raised — the hallucinated refund never reaches the caller.
+```
 
 It does three jobs:
 
-1. **Runtime gate.** Block a run the moment it breaks an invariant.
+1. **Runtime gate.** Block a run the moment it breaks an invariant (including pre-execution checks on tool inputs).
 2. **Benchmark.** Replay one dataset across model configurations and report pass rate, cost
    and p95 latency with a Pareto optimal recommendation.
 3. **Telemetry.** Emit verdicts and trajectory metrics as OpenTelemetry GenAI spans, to a
@@ -20,6 +35,8 @@ It does three jobs:
 ## Install
 
 ```bash
+git clone https://github.com/sankaranainar-p/agent-invariant-eval.git
+cd agent-invariant-eval
 pip install -e ".[dev]"                  # development (tests, CLI, OTLP, ruff, mypy)
 pip install -e ".[cli,otlp]"             # core + CLI + OTLP exporter (or ".[all]")
 pytest
@@ -507,3 +524,9 @@ agent-invariant-eval/
     ├── test_frontier.py
     └── test_runtime.py
 ```
+
+## Disclaimer
+
+This is a personal open-source project and is not affiliated with, sponsored by, or endorsed by
+any current or past employer. All example datasets, model names, latencies, and prices are
+fictional.

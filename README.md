@@ -395,7 +395,7 @@ Each evaluated run becomes one trace. Payloads (prompts, tool arguments, complet
 never exported. Only names, timings, token counts, verdicts and masked evidence leave the
 process.
 
-![Jaeger trace of a blocked payment dispute run showing invoke_agent and execute_tool spans alongside gen_ai.evaluation.result events flagging the ungrounded $2,199.90 refund figure](docs/assets/jaeger-trace.png)
+![Jaeger trace of a blocked payment dispute run showing invoke_agent and execute_tool spans alongside gen_ai.evaluation.result events flagging the ungrounded $2,199.90 refund figure](https://raw.githubusercontent.com/sankaranainar-p/agent-invariant-eval/main/docs/assets/jaeger-trace.png)
 
 | Source | OTel span name | Attributes |
 |---|---|---|

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2
+
+* Added real Jaeger OpenTelemetry trace screenshot (`docs/assets/jaeger-trace.png`) linked with
+  an absolute URL so it renders on both GitHub and PyPI.
+
 ## 0.3.1
 
 * Documentation & metadata polish for PyPI: updated README with `pip install agent-invariant-eval`,

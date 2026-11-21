@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+* Documentation & metadata polish for PyPI: updated README with `pip install agent-invariant-eval`,
+  PyPI badge, cleaned tagline formatting, and added ORCID to `CITATION.cff`.
+
 ## 0.3.0
 
 ### Runtime and telemetry

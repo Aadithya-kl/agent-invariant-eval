@@ -1,6 +1,7 @@
 # agent-invariant-eval
 
 [![CI](https://github.com/sankaranainar-p/agent-invariant-eval/actions/workflows/ci.yml/badge.svg)](https://github.com/sankaranainar-p/agent-invariant-eval/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/agent-invariant-eval.svg)](https://pypi.org/project/agent-invariant-eval/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -35,10 +36,16 @@ It does three jobs:
 ## Install
 
 ```bash
+pip install agent-invariant-eval         # core library
+pip install "agent-invariant-eval[all]"  # core + CLI + OTLP exporter
+```
+
+To run the test suite and bundled example from source:
+
+```bash
 git clone https://github.com/sankaranainar-p/agent-invariant-eval.git
 cd agent-invariant-eval
-pip install -e ".[dev]"                  # development (tests, CLI, OTLP, ruff, mypy)
-pip install -e ".[cli,otlp]"             # core + CLI + OTLP exporter (or ".[all]")
+pip install -e ".[dev]"
 pytest
 python examples/payment_dispute_agent/run_eval.py
 ```

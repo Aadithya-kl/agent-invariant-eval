@@ -424,6 +424,7 @@ def test_allowed_domains_and_ignore_keys():
 
 def test_dot_separated_pan_and_known_bin_filter():
     assert [f.kind for f in find_pci("card 4111.1111.1111.1111.")] == ["pan"]
+    assert [f.kind for f in find_pci(f"Paid.{TEST_PAN}")] == ["pan"]
     # Decimals, timestamps, and large amounts must never trigger PAN detection.
     for clean in (
         "rate: 0.4111111111111111",

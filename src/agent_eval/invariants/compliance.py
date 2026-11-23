@@ -362,7 +362,7 @@ class NoPII(BaseInvariant):
 # --------------------------------------------------------------------------- #
 
 _PAN_CANDIDATE = re.compile(
-    r"(?<![\d.])(?:\d{4}(?:\.\d{4}){3}|\d(?:[ -]?\d){12,18})(?!\.\d)(?!\d)"
+    r"(?<!\d\.)(?<!\d)(?:\d{4}(?:\.\d{4}){3}|\d(?:[ -]?\d){12,18})(?!\.\d)(?!\d)"
 )
 _CVV = re.compile(
     r"\b(?:cvv2?|cvc2?|cid|csc|card\s+verification(?:\s+(?:value|code))?|security\s+code)\b"

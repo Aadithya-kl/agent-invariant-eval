@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+* `pci_compliant`: catch card numbers immediately following a non-numeric period (such as
+  `Paid.4111...`) while continuing to ignore decimal numbers (`0.4111...`).
+* Pinned all GitHub Actions in `ci.yml` and `release.yml` to commit SHAs.
+* Scoped `release.yml` write permissions (`contents: write`, `id-token: write`) to the
+  `build-and-publish` job only, with top-level `permissions: {}`.
+
 ## 0.3.2
 
 * Added real Jaeger OpenTelemetry trace screenshot (`docs/assets/jaeger-trace.png`) linked with

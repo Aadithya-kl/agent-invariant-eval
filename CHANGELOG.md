@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+* `no_pii`: added Aadhaar (12-digit, first digit 2-9) and Virtual ID (`aadhaar_vid`, 16-digit)
+  detection using the Verhoeff checksum (`verhoeff_valid`), with context gating
+  (`require_aadhaar_context=True` by default for `aadhaar`, `aadhar`, `uidai`, `virtual id`,
+  `vid`) and opt-in PDF/OCR line-wrap support (`allow_line_breaks=False`).
 * `pci_compliant`: catch card numbers immediately following a non-numeric period (such as
   `Paid.4111...`) while continuing to ignore decimal numbers (`0.4111...`).
 * Pinned all GitHub Actions in `ci.yml` and `release.yml` to commit SHAs.

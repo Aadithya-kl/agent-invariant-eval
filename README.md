@@ -195,7 +195,7 @@ Anything other than a clean, explicit pass is a failure:
 
 | Name | Factory | Stages | What it asserts |
 |---|---|---|---|
-| `no_pii` | `assert_no_pii()` | input, span, output | No SSN, ABA routing number, email or high entropy secret in any payload |
+| `no_pii` | `assert_no_pii()` | input, span, output | No SSN, ABA routing number, Aadhaar/VID, email or secret in any payload |
 | `pci_compliant` | `assert_pci_compliant()` | input, span, output | No Luhn valid PAN (13 to 19 digits) and no CVV pattern |
 | `numeric_grounding` | `assert_numeric_grounding()` | output | Every monetary figure in the answer exists in a tool output |
 | `sla_bounds` | `assert_sla_bounds(max_latency_ms, max_tokens)` | span, output | Latency and token budgets |
@@ -212,6 +212,12 @@ Detection details:
   and a routing keyword (routing, ABA, RTN) just before it. One in ten random nine digit ids
   passes the checksum alone, so the keyword is required by default. Use
   `assert_no_pii(require_routing_context=False)` to flag on the checksum alone.
+* **Aadhaar and Virtual ID (VID).** Twelve digits (starting with 2 to 9) for Aadhaar, or 16
+  digits for VID (`aadhaar_vid`), in plain, space-grouped (`4-4-4` / `4-4-4-4`) or
+  hyphen-grouped form, verified with the Verhoeff checksum and a nearby keyword (`aadhaar`,
+  `aadhar`, `uidai`, `virtual id`, `vid`; bare `uid` is excluded). Use
+  `assert_no_pii(require_aadhaar_context=False)` to flag on the checksum alone, and
+  `allow_line_breaks=True` for PDF or OCR text where a number wraps across a single newline.
 * **Incremental & pre-execution scanning.** When a span opens with an `input`, `Stage.SPAN`
   invariants run before the `with` block executes (blocking tool side effects on violating inputs).
   When the span closes, only its new payloads are scanned. The final pass scans everything once

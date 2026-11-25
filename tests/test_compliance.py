@@ -19,8 +19,14 @@ from agent_eval.invariants import (
     luhn_valid,
     mask_pci,
     mask_pii,
+    verhoeff_valid,
 )
-from agent_eval.invariants.compliance import aba_checksum_valid, shannon_entropy
+from agent_eval.invariants.compliance import (
+    _VERHOEFF_D,
+    _VERHOEFF_P,
+    aba_checksum_valid,
+    shannon_entropy,
+)
 
 TEST_PAN = "4111111111111111"  # well known Luhn valid test number
 
@@ -444,3 +450,162 @@ def test_dot_separated_pan_and_known_bin_filter():
     assert assert_pci_compliant(require_known_bin=True).evaluate(
         Trajectory(final_output=non_card)
     ).passed is True
+
+
+# ---- Aadhaar and Virtual ID (VID) ----------------------------------------------
+
+_VERHOEFF_INV = (0, 4, 3, 2, 1, 5, 6, 7, 8, 9)
+
+
+def _with_verhoeff(body: str) -> str:
+    """Append a synthetic Verhoeff check digit to ``body``."""
+    c = 0
+    for index, ch in enumerate(reversed(body), start=1):
+        c = _VERHOEFF_D[c][_VERHOEFF_P[index % 8][int(ch)]]
+    return f"{body}{_VERHOEFF_INV[c]}"
+
+
+def _group4(digits: str, sep: str) -> str:
+    return sep.join(digits[i : i + 4] for i in range(0, len(digits), 4))
+
+
+def test_verhoeff_helper_and_validation():
+    aadhaar = _with_verhoeff("23456789012")
+    assert len(aadhaar) == 12
+    assert verhoeff_valid(aadhaar)
+    bad = aadhaar[:-1] + str((int(aadhaar[-1]) + 1) % 10)
+    assert not verhoeff_valid(bad)
+    assert not verhoeff_valid("")
+    assert not verhoeff_valid("abc")
+
+
+@pytest.mark.parametrize("keyword", ["aadhaar", "Aadhar", "UIDAI", "virtual id", "VID"])
+@pytest.mark.parametrize("sep", ["", " ", "-"])
+def test_aadhaar_detected_with_keywords_and_formats(keyword, sep):
+    number = _with_verhoeff("34567890123")
+    formatted = _group4(number, sep) if sep else number
+    text = f"Customer {keyword}: {formatted} verified"
+    findings = find_pii(text)
+    assert [(f.kind, f.masked) for f in findings] == [("aadhaar", f"********{number[-4:]}")]
+    masked = mask_pii(text)
+    assert formatted not in masked
+    assert f"********{number[-4:]}" in masked
+
+
+def test_aadhaar_key_style_context_and_vid_detection():
+    aadhaar = _with_verhoeff("45678901234")
+    vid = _with_verhoeff("123456789012345")
+    assert len(vid) == 16
+
+    traj_key = Trajectory(spans=[tool_span({"aadhaar_number": _group4(aadhaar, " ")})])
+    res = assert_no_pii().evaluate(traj_key)
+    assert res.passed is False
+    assert res.span_ids == [traj_key.spans[0].span_id]
+    assert all(aadhaar not in item and f"********{aadhaar[-4:]}" in item for item in res.evidence)
+
+    for sep in ("", " ", "-"):
+        fmt_vid = _group4(vid, sep) if sep else vid
+        findings = find_pii(f"Virtual ID {fmt_vid}")
+        assert [(f.kind, f.masked) for f in findings] == [
+            ("aadhaar_vid", f"************{vid[-4:]}")
+        ]
+
+
+def test_aadhaar_line_wrap_opt_in():
+    number = _with_verhoeff("56789012345")
+    wrapped = f"Aadhaar:\n{number[:4]} {number[4:8]}\n {number[8:]}"
+    assert find_pii(wrapped) == []
+    findings = find_pii(wrapped, allow_line_breaks=True)
+    assert [(f.kind, f.masked) for f in findings] == [("aadhaar", f"********{number[-4:]}")]
+
+    vid = _with_verhoeff("234567890123456")
+    wrapped_vid = f"VID: {vid[:4]} {vid[4:8]}\n{vid[8:12]} {vid[12:]}"
+    assert find_pii(wrapped_vid) == []
+    vid_findings = find_pii(wrapped_vid, allow_line_breaks=True)
+    assert [f.kind for f in vid_findings] == ["aadhaar_vid"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Aadhaar XXXX XXXX 1234",
+        "Aadhaar xxxxxxxx1234",
+        "Aadhaar ********1234",
+        "Virtual ID ************1234",
+    ],
+)
+def test_already_masked_aadhaar_ignored_and_unchanged(text):
+    assert find_pii(text) == []
+    assert find_pii(text, require_aadhaar_context=False) == []
+    assert mask_pii(text) == text
+
+
+def test_vid_and_longer_digit_run_boundaries():
+    # Craft a 16-digit VID whose first 12 digits start with 2-9 and are also Verhoeff valid.
+    prefix12 = _with_verhoeff("67890123456")
+    vid16 = _with_verhoeff(prefix12 + "789")
+    for sep in ("", " ", "-"):
+        fmt = _group4(vid16, sep) if sep else vid16
+        findings = find_pii(f"Aadhaar / Virtual ID: {fmt}")
+        assert [f.kind for f in findings] == ["aadhaar_vid"]
+
+    # 12 digits embedded inside a 13-digit and 17-digit run must yield zero findings.
+    aadhaar = _with_verhoeff("78901234567")
+    assert find_pii(f"Aadhaar {aadhaar}9") == []
+    assert find_pii(f"Aadhaar 1{aadhaar}") == []
+    assert find_pii(f"Aadhaar {vid16}0") == []
+
+
+def test_invalid_aadhaar_checksum_prefix_and_repeated_digits():
+    valid = _with_verhoeff("89012345678")
+    bad_checksum = valid[:-1] + str((int(valid[-1]) + 1) % 10)
+    starts_zero = _with_verhoeff("01234567890")
+    starts_one = _with_verhoeff("12345678901")
+    for candidate in (bad_checksum, starts_zero, starts_one, "2" * 12, "9" * 12, "0" * 16):
+        assert find_pii(f"Aadhaar {candidate}") == []
+        assert find_pii(f"Aadhaar {candidate}", require_aadhaar_context=False) == []
+
+
+@pytest.mark.parametrize("label", ["order", "account", "ref", "invoice", "uid"])
+def test_aadhaar_negative_controls_and_context_gate(label):
+    number = _with_verhoeff("90123456789")
+    text = f"{label} {number} processed"
+    assert find_pii(text) == []
+    findings = find_pii(text, require_aadhaar_context=False)
+    assert [(f.kind, f.masked) for f in findings] == [("aadhaar", f"********{number[-4:]}")]
+
+
+def test_aadhaar_labelled_synthetic_corpus():
+    import random
+
+    rng = random.Random(42)
+    pos_kw = ["Aadhaar", "aadhar", "UIDAI", "virtual id", "VID", "aadhaar_number:"]
+    neg_kw = ["order", "account", "ref", "invoice", "uid", "tracking", "batch"]
+    seps = ["", " ", "-"]
+
+    for idx in range(200):
+        is_vid = idx % 4 == 0
+        has_context = idx % 2 == 0
+        sep = seps[idx % len(seps)]
+        if is_vid:
+            body = "".join(str(rng.randint(0, 9)) for _ in range(15))
+            num = _with_verhoeff(body)
+            if len(set(num)) <= 1:
+                num = _with_verhoeff("1" + body[1:])
+            expected_kind = "aadhaar_vid"
+        else:
+            first = str(rng.randint(2, 9))
+            body = first + "".join(str(rng.randint(0, 9)) for _ in range(10))
+            num = _with_verhoeff(body)
+            if len(set(num)) <= 1:
+                num = _with_verhoeff("2" + "3" + body[2:])
+            expected_kind = "aadhaar"
+
+        formatted = _group4(num, sep) if sep else num
+        kw = pos_kw[idx % len(pos_kw)] if has_context else neg_kw[idx % len(neg_kw)]
+        sentence = f"Record {idx}: {kw} {formatted} checked on portal."
+        findings = find_pii(sentence)
+        if has_context:
+            assert [f.kind for f in findings] == [expected_kind], sentence
+        else:
+            assert findings == [], sentence

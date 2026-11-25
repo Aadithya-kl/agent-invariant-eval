@@ -147,6 +147,25 @@ _SSN_CONTEXT = re.compile(
     r"(?<![A-Za-z])(?:ssn|social[\s_]+security|tax[\s_]*id|tin)(?![A-Za-z])", re.IGNORECASE
 )
 _ROUTING_CONTEXT = re.compile(r"(?<![A-Za-z])(?:routing|aba|rtn)(?![A-Za-z])", re.IGNORECASE)
+_AADHAAR_CONTEXT = re.compile(
+    r"(?<![A-Za-z])(?:aadha?ar|uidai|virtual[\s_]+id|vid)(?![A-Za-z])",
+    re.IGNORECASE,
+)
+_AADHAAR_CANDIDATE = re.compile(
+    r"(?<!\d)(?:"
+    r"(?P<vid>\d{16}|\d{4}(?P<vs>[- ])\d{4}(?P=vs)\d{4}(?P=vs)\d{4})"
+    r"|(?P<aadhaar>[2-9]\d{11}|[2-9]\d{3}(?P<as>[- ])\d{4}(?P=as)\d{4})"
+    r")(?!\d)"
+)
+_AADHAAR_LINE_SEP = r"(?:[ -]|[ \t]*\r?\n[ \t]*)"
+_AADHAAR_CANDIDATE_MULTILINE = re.compile(
+    rf"(?<!\d)(?:"
+    rf"(?P<vid>\d{{16}}"
+    rf"|\d{{4}}{_AADHAAR_LINE_SEP}\d{{4}}{_AADHAAR_LINE_SEP}\d{{4}}{_AADHAAR_LINE_SEP}\d{{4}})"
+    rf"|(?P<aadhaar>[2-9]\d{{11}}"
+    rf"|[2-9]\d{{3}}{_AADHAAR_LINE_SEP}\d{{4}}{_AADHAAR_LINE_SEP}\d{{4}})"
+    rf")(?!\d)"
+)
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 _KNOWN_SECRET = re.compile(
     r"(?<![A-Za-z0-9_-])(?:"
@@ -183,6 +202,40 @@ def aba_checksum_valid(digits: str) -> bool:
     return total % 10 == 0 and digits != "000000000"
 
 
+_VERHOEFF_D: tuple[tuple[int, ...], ...] = (
+    (0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+    (1, 2, 3, 4, 0, 6, 7, 8, 9, 5),
+    (2, 3, 4, 0, 1, 7, 8, 9, 5, 6),
+    (3, 4, 0, 1, 2, 8, 9, 5, 6, 7),
+    (4, 0, 1, 2, 3, 9, 5, 6, 7, 8),
+    (5, 9, 8, 7, 6, 0, 4, 3, 2, 1),
+    (6, 5, 9, 8, 7, 1, 0, 4, 3, 2),
+    (7, 6, 5, 9, 8, 2, 1, 0, 4, 3),
+    (8, 7, 6, 5, 9, 3, 2, 1, 0, 4),
+    (9, 8, 7, 6, 5, 4, 3, 2, 1, 0),
+)
+_VERHOEFF_P: tuple[tuple[int, ...], ...] = (
+    (0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+    (1, 5, 7, 6, 2, 8, 3, 0, 9, 4),
+    (5, 8, 0, 3, 7, 9, 6, 1, 4, 2),
+    (8, 9, 1, 6, 0, 4, 3, 5, 2, 7),
+    (9, 4, 5, 3, 1, 2, 6, 8, 7, 0),
+    (4, 2, 8, 6, 5, 7, 3, 9, 0, 1),
+    (2, 7, 9, 3, 8, 0, 6, 4, 1, 5),
+    (7, 0, 4, 6, 9, 1, 3, 2, 5, 8),
+)
+
+
+def verhoeff_valid(number: str) -> bool:
+    """Return True when ``number`` (digits only) passes the Verhoeff checksum."""
+    if not number or not number.isdigit():
+        return False
+    checksum = 0
+    for index, ch in enumerate(reversed(number)):
+        checksum = _VERHOEFF_D[checksum][_VERHOEFF_P[index % 8][int(ch)]]
+    return checksum == 0
+
+
 def _mask_email(value: str) -> str:
     local, _, domain = value.partition("@")
     return f"{local[:1]}***@{domain}"
@@ -194,15 +247,19 @@ def find_pii(
     detect_secrets: bool = True,
     entropy_threshold: float = 4.0,
     require_routing_context: bool = True,
+    require_aadhaar_context: bool = True,
+    allow_line_breaks: bool = False,
     allowed_domains: Iterable[str] = (),
 ) -> list[Finding]:
-    """Find SSNs, ABA routing numbers, emails, known API keys and high entropy secrets.
+    """Find SSNs, ABA routing numbers, Aadhaar/VID, emails, and secrets.
 
-    A bare nine digit number is a routing number only when it passes the ABA
-    checksum and, by default, a routing keyword (routing, ABA, RTN) appears
-    just before it. About one in ten random nine digit numbers passes the
-    checksum, so the keyword keeps ids and timestamps from being blocked.
-    Set ``require_routing_context=False`` to flag on the checksum alone.
+    Bare nine digit routing numbers and 12/16 digit Aadhaar/VID numbers require
+    both a valid checksum (ABA 3-7-1 or Verhoeff) and a nearby context keyword
+    by default. About one in ten random numbers passes either checksum, so the
+    context gate keeps ids and timestamps from being blocked. Set
+    ``require_routing_context=False`` or ``require_aadhaar_context=False`` to
+    flag on the checksum alone. Set ``allow_line_breaks=True`` to match Aadhaar
+    or VID numbers split across a single newline (for PDF or OCR text).
     """
     findings: list[Finding] = []
     allowed = frozenset(d.lower().lstrip("@") for d in allowed_domains)
@@ -220,6 +277,24 @@ def find_pii(
         ):
             findings.append(
                 Finding("routing_number", match.start(), match.end(), f"*****{digits[-4:]}")
+            )
+
+    aadhaar_re = _AADHAAR_CANDIDATE_MULTILINE if allow_line_breaks else _AADHAAR_CANDIDATE
+    for match in aadhaar_re.finditer(text):
+        raw = match.group()
+        digits = re.sub(r"\D", "", raw)
+        if len(set(digits)) <= 1 or not verhoeff_valid(digits):
+            continue
+        context = text[max(0, match.start() - 40) : match.start()]
+        if require_aadhaar_context and not _AADHAAR_CONTEXT.search(context):
+            continue
+        if match.group("vid") is not None:
+            findings.append(
+                Finding("aadhaar_vid", match.start(), match.end(), f"************{digits[-4:]}")
+            )
+        else:
+            findings.append(
+                Finding("aadhaar", match.start(), match.end(), f"********{digits[-4:]}")
             )
 
     for match in _EMAIL.finditer(text):
@@ -281,6 +356,8 @@ def mask_pii(
     detect_secrets: bool = True,
     entropy_threshold: float = 4.0,
     require_routing_context: bool = True,
+    require_aadhaar_context: bool = True,
+    allow_line_breaks: bool = False,
     allowed_domains: Iterable[str] = (),
 ) -> str:
     """Return ``text`` with every PII finding replaced by its masked form."""
@@ -291,13 +368,15 @@ def mask_pii(
             detect_secrets=detect_secrets,
             entropy_threshold=entropy_threshold,
             require_routing_context=require_routing_context,
+            require_aadhaar_context=require_aadhaar_context,
+            allow_line_breaks=allow_line_breaks,
             allowed_domains=allowed_domains,
         ),
     )
 
 
 class NoPII(BaseInvariant):
-    """No SSNs, routing numbers, emails or secrets in payloads."""
+    """No SSNs, routing numbers, Aadhaar/VID, emails or secrets in payloads."""
 
     name: ClassVar[str] = "no_pii"
 
@@ -308,6 +387,8 @@ class NoPII(BaseInvariant):
         detect_secrets: bool = True,
         entropy_threshold: float = 4.0,
         require_routing_context: bool = True,
+        require_aadhaar_context: bool = True,
+        allow_line_breaks: bool = False,
         allowed_domains: Iterable[str] = (),
         ignore_keys: Iterable[str] = (),
         severity: Severity = Severity.BLOCK,
@@ -317,6 +398,8 @@ class NoPII(BaseInvariant):
         self.detect_secrets = detect_secrets
         self.entropy_threshold = entropy_threshold
         self.require_routing_context = require_routing_context
+        self.require_aadhaar_context = require_aadhaar_context
+        self.allow_line_breaks = allow_line_breaks
         self.allowed_domains = frozenset(d.lower().lstrip("@") for d in allowed_domains)
         self.ignore_keys = frozenset(ignore_keys)
 
@@ -340,6 +423,8 @@ class NoPII(BaseInvariant):
                 detect_secrets=self.detect_secrets,
                 entropy_threshold=self.entropy_threshold,
                 require_routing_context=self.require_routing_context,
+                require_aadhaar_context=self.require_aadhaar_context,
+                allow_line_breaks=self.allow_line_breaks,
                 allowed_domains=self.allowed_domains,
             ):
                 evidence.append(f"{finding.kind} in {location}: {finding.masked}")

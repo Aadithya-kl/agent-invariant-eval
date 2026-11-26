@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+* Added tested LangGraph example (`examples/langgraph_agent/graph.py`), optional `[langgraph]`
+  extra, integration tests (`tests/test_langgraph.py`), and a dedicated `langgraph` CI job.
 * `no_pii`: added Aadhaar (12-digit, first digit 2-9) and Virtual ID (`aadhaar_vid`, 16-digit)
   detection using the Verhoeff checksum (`verhoeff_valid`), with context gating
   (`require_aadhaar_context=True` by default for `aadhaar`, `aadhar`, `uidai`, `virtual id`,

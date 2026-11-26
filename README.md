@@ -294,10 +294,12 @@ def on_tool_end(tool_name, tool_input, tool_output, started_ns, ended_ns):
     ))
 ```
 
-* **LangGraph.** Decorate the function that calls `graph.invoke`, and open
-  `session.agent(node_name)` inside each node (or record spans from a callback handler).
+* **LangGraph.** See the tested working example in [examples/langgraph_agent/graph.py](examples/langgraph_agent/graph.py)
+  (install with `pip install "agent-invariant-eval[langgraph]"`). Nodes read `current_session()`
+  so the graph state stays plain JSON-serializable data, and `EvaluationSession` blocks bad inputs,
+  tool arguments, conditional routing loops and hallucinated outputs.
 * **CrewAI.** Decorate the function that calls `crew.kickoff`, and record spans from the step
-  and task callbacks.
+  and task callbacks. (Pattern only; not tested against a specific CrewAI version.)
 * **Raw API loop.** Wrap each model call in `session.llm(model)` and each tool in `session.tool(name)`.
 
 Parallel branches are safe with `asyncio.gather`, `asyncio.TaskGroup` and `asyncio.to_thread`:
@@ -308,9 +310,6 @@ started. Plain threads do not inherit context, so pass `parent_id` there:
 with session.agent("supervisor") as parent:
     pool.map(lambda q: run_tool(q, parent_id=parent.span.span_id), queries)
 ```
-
-These are integration patterns, not shipped adapters. The repository does not import either
-framework and has not been tested against a specific version of them.
 
 ## Benchmark: cost to performance frontier
 

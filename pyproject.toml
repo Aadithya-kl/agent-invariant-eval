@@ -31,6 +31,7 @@ dependencies = [
 [project.optional-dependencies]
 cli = ["typer>=0.12"]
 otlp = ["opentelemetry-exporter-otlp-proto-http>=1.27"]
+langgraph = ["langgraph>=0.2"]
 all = ["agent-invariant-eval[cli,otlp]"]
 dev = [
     "agent-invariant-eval[all]",
@@ -54,7 +55,7 @@ packages = ["src/agent_eval"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src", "examples/payment_dispute_agent"]
+pythonpath = ["src", "examples/payment_dispute_agent", "examples/langgraph_agent"]
 addopts = "-q"
 
 [tool.ruff]
